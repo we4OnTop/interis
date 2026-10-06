@@ -88,6 +88,25 @@ prepared file is written to `<data>/models/models.lock.json`. Conversions are ma
 specific, so this file lives in the data directory, not the repo. Every pipeline run checks
 the hashes and refuses to start on any difference, including extra files.
 
+### Verified mirror for the gated pyannote model
+
+`pyannote/speaker-diarization-community-1` is gated: you need a free HF account and must
+accept the conditions. `interis setup-models --allow-verified-mirror` instead downloads the
+files from the ungated mirror `pyannote-community/speaker-diarization-community-1`. That
+mirror is run by an unofficial organisation, so it is **not trusted**. Every file is
+checked against the sha256 / git-blob hashes that the **official** repo publishes for the
+pinned revision; this metadata is visible without a login. As of 2026-10-06 all five files
+are byte-identical. The license (CC-BY-4.0) allows redistribution. For the thesis setup,
+the official route with your own token is still preferred, because it also supports the
+pyannote authors.
+
+### Benchmark data (not shipped, downloaded on demand)
+
+AMI Meeting Corpus (CC-BY-4.0, https://groups.inf.ed.ac.uk/ami/): audio of 4 meetings,
+individual headset channels, and the manual annotations (`ami_public_manual_1.6.2.zip`).
+These are stored under `<data>/bench/ami` with a `SHA256SUMS` file. The XML is parsed with
+the stdlib (expat with entity-expansion protection).
+
 ### TLS interception (found on the development PC)
 
 On the development machine, **Kaspersky Anti-Virus** re-signs all HTTPS traffic with its own

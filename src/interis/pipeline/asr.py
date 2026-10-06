@@ -31,6 +31,7 @@ class AsrOptions:
     hotwords: str | None = None  # glossary: names, technical terms
     initial_prompt: str | None = None
     threads: int | None = None
+    language: str = "de"  # interviews are German; other values only for benchmarks
 
     def as_params(self) -> dict:
         return dict(self.__dict__, threads=None)  # thread count does not change results
@@ -50,7 +51,7 @@ def transcribe(audio: np.ndarray, model_dir: Path, opts: AsrOptions,
     )
     segments_iter, info = model.transcribe(
         audio,
-        language="de",
+        language=opts.language,
         task="transcribe",
         beam_size=opts.beam_size,
         best_of=opts.beam_size,

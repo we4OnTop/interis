@@ -47,7 +47,8 @@ def cmd_setup_models(args: argparse.Namespace, paths: Paths) -> int:
     for key in keys:
         try:
             # The token is only sent for gated models.
-            setup_model(paths, key, token if MODELS[key].gated else None)
+            setup_model(paths, key, token if MODELS[key].gated else None,
+                        allow_mirror=args.allow_verified_mirror)
         except ModelError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
@@ -237,6 +238,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--use-system-certs", action="store_true",
                    help="verify TLS against the Windows certificate store (needed behind "
                         "TLS-intercepting antivirus/proxies)")
+    p.add_argument("--allow-verified-mirror", action="store_true",
+                   help="without HF_TOKEN: fetch gated models from their ungated mirror; "
+                        "files are verified against the official repo's hashes")
     p.set_defaults(func=cmd_setup_models)
 
     p = sub.add_parser("doctor", help="check privacy and integrity guarantees")

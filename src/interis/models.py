@@ -41,6 +41,9 @@ class ModelSpec:
     files: tuple[str, ...]
     license: str
     gated: bool = False
+    # Ungated mirror (repo, revision) of a gated model. Files are downloaded from it but
+    # verified against the hashes the *official* repo publishes for the pinned revision.
+    mirror: tuple[str, str] | None = None
 
     @property
     def url(self) -> str:
@@ -70,7 +73,9 @@ MODELS: dict[str, ModelSpec] = {
                   ("config.yaml", "embedding/pytorch_model.bin",
                    "segmentation/pytorch_model.bin", "plda/plda.npz",
                    "plda/xvec_transform.npz"),
-                  "CC-BY-4.0", gated=True),
+                  "CC-BY-4.0", gated=True,
+                  mirror=("pyannote-community/speaker-diarization-community-1",
+                          "8a527374977391da736e0daaef26855d949d9685")),
         ModelSpec("wav2vec2-german", "jonatasgrosman/wav2vec2-large-xlsr-53-german",
                   "4b8a02957378d0f2da2ef74091156b032c485a89", "wav2vec2",
                   ("config.json", "preprocessor_config.json", "vocab.json",
@@ -189,16 +194,18 @@ def _verify_against_hub(spec: ModelSpec, raw: Path, token: str | None) -> None:
             raise ModelError(f"{spec.repo}/{rel}: hash does not match the Hub. Aborting.")
 
 
-def _download(spec: ModelSpec, raw: Path, token: str | None) -> None:
+def _download(spec: ModelSpec, raw: Path, token: str | None, use_mirror: bool) -> None:
     from huggingface_hub import snapshot_download
 
+    repo, revision = spec.mirror if use_mirror and spec.mirror else (spec.repo, spec.revision)
     snapshot_download(
-        repo_id=spec.repo,
-        revision=spec.revision,
+        repo_id=repo,
+        revision=revision,
         allow_patterns=list(spec.files),
         local_dir=raw,
-        token=token,
+        token=token if repo == spec.repo else None,
     )
+    # Always verified against the official repo's published hashes.
     _verify_against_hub(spec, raw, token)
 
 
@@ -244,12 +251,14 @@ _PREPARE = {"whisper": _prepare_whisper, "wav2vec2": _prepare_wav2vec2,
             "pyannote": _prepare_pyannote, "embedding": _prepare_embedding}
 
 
-def setup_model(paths: Paths, key: str, token: str | None, log: Log = print) -> None:
+def setup_model(paths: Paths, key: str, token: str | None, log: Log = print,
+                allow_mirror: bool = False) -> None:
     spec = MODELS[key]
     if is_ready(paths, key):
         log(f"[{key}] already set up and verified")
         return
-    if spec.gated and not token:
+    use_mirror = spec.gated and not token and allow_mirror and spec.mirror is not None
+    if spec.gated and not token and not use_mirror:
         raise ModelError(
             f"[{key}] is a gated model. Accept its conditions at {spec.url} with your "
             "Hugging Face account, create a read token, and run setup with the token in the "
@@ -261,8 +270,9 @@ def setup_model(paths: Paths, key: str, token: str | None, log: Log = print) -> 
     target = ready_dir(paths, key)
     shutil.rmtree(staging, ignore_errors=True)
 
-    log(f"[{key}] downloading {spec.repo}@{spec.revision[:10]} …")
-    _download(spec, raw, token)
+    source = spec.mirror[0] if use_mirror and spec.mirror else spec.repo
+    log(f"[{key}] downloading {source} (pinned to {spec.repo}@{spec.revision[:10]}) …")
+    _download(spec, raw, token, use_mirror)
     log(f"[{key}] download verified against the Hub, preparing …")
     staging.mkdir(parents=True)
     _PREPARE[spec.kind](spec, raw, staging)
@@ -273,6 +283,7 @@ def setup_model(paths: Paths, key: str, token: str | None, log: Log = print) -> 
     lock[key] = {
         "repo": spec.repo,
         "revision": spec.revision,
+        "downloaded_from": source,
         "license": spec.license,
         "prepared_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "prepared_with": {p: version(p) for p in ("ctranslate2", "transformers", "torch")},
