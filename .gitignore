@@ -1,0 +1,65 @@
+# --- Interview data: NEVER commit (lives in the encrypted VeraCrypt volume) ---
+data/
+interis-data/
+*.sqlite
+*.sqlite3
+*.db
+exports/
+cache/
+logs/
+*.log
+
+# Audio / video recordings
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.opus
+*.wma
+*.mp4
+*.mov
+*.webm
+*.npy
+*.npz
+
+# Exported transcripts (may contain personal data)
+*.docx
+*.xlsx
+
+# Models / weights
+models/
+*.bin
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.ckpt
+
+# Secrets
+.env
+.env.*
+*.token
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Frontend
+node_modules/
+web/dist/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
