@@ -69,6 +69,51 @@ Ergebnis in `X:\interis-data\exports\I01\`:
   Sprechen kursiv
 - `I01.txt`: Klartext mit Zeitstempeln
 
+## Interviewleitfaden
+
+Als Markdown-Datei, z. B. `X:\interis-data\leitfaden.md`:
+
+```markdown
+# Leitfaden Masterarbeit
+## Einstieg
+- F1: Erzählen Sie mir, wie Ihr Arbeitsalltag aussieht.
+  ~ Wie sieht ein typischer Arbeitstag bei Ihnen aus?     (andere Formulierung)
+  > Seit wann sind Sie in dieser Position?                 (geplante Nachfrage)
+## Künstliche Intelligenz
+- F2: Welche Rolle spielt künstliche Intelligenz in Ihrer Arbeit?
+- Wie gehen Sie mit vertraulichen Daten um?                (Code wird automatisch vergeben)
+```
+
+```powershell
+uv run interis transcribe interview01.m4a --id I01 --guide X:\interis-data\leitfaden.md
+# Leitfaden geändert? Analyse neu, ohne neu zu transkribieren:
+uv run interis analyze X:\interis-data\exports\I01\I01.json --guide X:\interis-data\leitfaden.md
+```
+
+Ergebnis:
+- Deine Fragen sind im Transkript markiert:
+  - `[F1]` = Leitfadenfrage
+  - `[F1 Nachfrage]` = geplante Nachfrage
+  - `[Nachfrage]` = spontane Nachfrage
+- Im Word-Dokument steht am Ende eine Tabelle „Leitfaden-Abdeckung“. Sie zeigt, welche
+  Fragen wann gestellt wurden und wo sie möglicherweise schon vorher, später oder ohne
+  Frage beantwortet wurden.
+- Alle Markierungen sind **Vorschläge** und werden von dir geprüft.
+
+## Stimmprofil (damit du sicher als „Interviewer“ erkannt wirst)
+
+Etwa 60 Sekunden nur deine Stimme aufnehmen (z. B. einen Text vorlesen), dann:
+
+```powershell
+uv run interis enroll X:\interis-data\meine_stimme.wav
+```
+
+Ohne Stimmprofil wird der Interviewer daran erkannt, wer anteilig die meisten Fragen
+stellt. Das Stimmprofil ist ein biometrisches Merkmal. Es bleibt im verschlüsselten
+Datenordner (`voices\`) und landet nie in Transkripten oder Exporten.
+
+## Zwischenspeicher
+
 Zwischenergebnisse werden zwischengespeichert. Ein abgebrochener Lauf (z. B. weil der
 Laptop in den Ruhezustand gegangen ist) macht beim nächsten Start dort weiter. Während
 langer Läufe den Laptop ans Netzteil hängen und den Ruhezustand deaktivieren.

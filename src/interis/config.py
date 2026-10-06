@@ -37,6 +37,11 @@ class Paths:
         return self.root / "tmp"
 
     @property
+    def voices(self) -> Path:
+        """Voice profiles (biometric data – stays in the encrypted data directory)."""
+        return self.root / "voices"
+
+    @property
     def hf_home(self) -> Path:
         return self.models / "hf_home"
 

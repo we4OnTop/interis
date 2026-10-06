@@ -6,6 +6,7 @@ bootstrap has configured the environment (see :mod:`interis._bootstrap`)."""
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -60,8 +61,91 @@ def cmd_doctor(args: argparse.Namespace, paths: Paths) -> int:
     return run_doctor(paths)
 
 
-def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
+def _analysis_options(args: argparse.Namespace, paths: Paths, redo_roles: bool):
+    from interis.analysis.analyze import AnalysisOptions
+    from interis.analysis.guide import load_guide
+    from interis.analysis.roles import load_voice
+
+    guide = load_guide(Path(args.guide)) if args.guide else None
+    voice = load_voice(paths.voices / f"{args.voice}.json")
+    if voice is None and redo_roles:
+        print(f"Note: no voice profile '{args.voice}' – interviewer is guessed from the share "
+              "of questions (run `interis enroll` for voice-based recognition).")
+    return AnalysisOptions(guide=guide, voice=voice, redo_roles=redo_roles,
+                           match_threshold=args.match_threshold,
+                           match_margin=args.match_margin, answer_z=args.answer_z)
+
+
+def _write_outputs(transcript, out_dir: Path, formats: str) -> None:
     from interis.export import write_docx, write_json, write_txt
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    base = out_dir / transcript.meta["interview_id"]
+    writers = {"json": write_json, "txt": write_txt, "docx": write_docx}
+    for fmt in (f.strip() for f in formats.split(",")):
+        writers[fmt](transcript, base.with_suffix(f".{fmt}"))
+
+
+def _summary(transcript) -> str:
+    a = transcript.analysis
+    roles = a.get("roles", {})
+    qs = a.get("questions", [])
+    main = sum(q.get("match") == "main" for q in qs)
+    parts = [f"interviewer: {roles.get('interviewer') or '?'} ({roles.get('method', 'none')})",
+             f"questions: {len(qs)}"]
+    if a.get("guide"):
+        parts.append(f"matched to guide: {main}, suggestions elsewhere: "
+                     f"{len(a.get('suggestions', []))}")
+    return ", ".join(parts)
+
+
+def cmd_enroll(args: argparse.Namespace, paths: Paths) -> int:
+    from interis.analysis.roles import save_voice, voice_embedding
+    from interis.models import DIARIZATION_MODEL, MODELS, ModelError, verify_ready
+    from interis.pipeline.run import decode
+
+    audio_path = Path(args.audio).resolve()
+    if not audio_path.is_file():
+        print(f"ERROR: file not found: {audio_path}", file=sys.stderr)
+        return 2
+    try:
+        model_dir = verify_ready(paths, DIARIZATION_MODEL)
+    except ModelError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    audio = decode(audio_path)
+    if len(audio) < 20 * 16000:
+        print("ERROR: please use at least 20 s (ideally ~60 s) of only your own voice.",
+              file=sys.stderr)
+        return 2
+    embedding = voice_embedding(audio, model_dir)
+    target = paths.voices / f"{args.label}.json"
+    save_voice(target, args.label, embedding, MODELS[DIARIZATION_MODEL].revision)
+    print(f"Voice profile saved: {target}")
+    return 0
+
+
+def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
+    from interis.models import ModelError
+    from interis.pipeline.run import run_analysis
+    from interis.pipeline.types import Transcript
+
+    src = Path(args.transcript).resolve()
+    transcript = Transcript.from_dict(json.loads(src.read_text(encoding="utf-8")))
+    has_roles = any(s.get("role") in ("interviewer", "interviewee")
+                    for s in transcript.speakers)
+    try:
+        run_analysis(transcript, paths, _analysis_options(args, paths, not has_roles),
+                     threads=args.threads)
+    except ModelError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    _write_outputs(transcript, src.parent, args.formats)
+    print(f"{_summary(transcript)}\nOutput: {src.parent}")
+    return 0
+
+
+def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
     from interis.models import ModelError
     from interis.pipeline.asr import AsrOptions
     from interis.pipeline.run import PipelineOptions, run_pipeline
@@ -79,6 +163,7 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
         diarize=not args.no_diarize,
         num_speakers=args.speakers or None,
         interview_id=args.id,
+        analysis=_analysis_options(args, paths, redo_roles=True),
     )
     started = time.monotonic()
     try:
@@ -89,13 +174,10 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
     print()
 
     out_dir = paths.exports / transcript.meta["interview_id"]
-    out_dir.mkdir(parents=True, exist_ok=True)
-    base = out_dir / transcript.meta["interview_id"]
-    writers = {"json": write_json, "txt": write_txt, "docx": write_docx}
-    for fmt in args.formats.split(","):
-        writers[fmt.strip()](transcript, base.with_suffix(f".{fmt.strip()}"))
+    _write_outputs(transcript, out_dir, args.formats)
     elapsed = time.monotonic() - started
     duration = transcript.meta["audio"]["duration_s"]
+    print(f"{_summary(transcript)}")
     print(f"Done in {elapsed / 60:.1f} min for {duration / 60:.1f} min audio "
           f"(factor {elapsed / max(duration, 1):.2f}×). Output: {out_dir}")
     return 0
@@ -132,9 +214,36 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--threads", type=int, help="CPU threads (default: all)")
     p.add_argument("--no-align", action="store_true", help="skip word alignment")
     p.add_argument("--no-diarize", action="store_true", help="skip speaker diarization")
-    p.add_argument("--formats", default="json,docx,txt", help="comma list of json,docx,txt")
+    _add_analysis_args(p)
     p.set_defaults(func=cmd_transcribe)
+
+    p = sub.add_parser("analyze", help="re-run question/guide analysis on a transcript JSON "
+                                       "(e.g. after editing the guide)")
+    p.add_argument("transcript", help="path to <ID>.json")
+    p.add_argument("--threads", type=int, help="CPU threads (default: all)")
+    _add_analysis_args(p)
+    p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("enroll", help="create your voice profile from a recording of only "
+                                      "your voice (~60 s)")
+    p.add_argument("audio", help="recording with only your voice")
+    p.add_argument("--label", default="interviewer", help="profile name (default: interviewer)")
+    p.set_defaults(func=cmd_enroll)
     return parser
+
+
+def _add_analysis_args(p: argparse.ArgumentParser) -> None:
+    from interis.analysis.analyze import ANSWER_Z, MATCH_MARGIN, MATCH_THRESHOLD
+
+    p.add_argument("--guide", help="interview guide (Markdown, see README)")
+    p.add_argument("--voice", default="interviewer", help="voice profile to identify you")
+    p.add_argument("--match-threshold", type=float, default=MATCH_THRESHOLD,
+                   help="similarity needed to link a question to the guide")
+    p.add_argument("--match-margin", type=float, default=MATCH_MARGIN,
+                   help="required lead over the second-best guide question")
+    p.add_argument("--answer-z", type=float, default=ANSWER_Z,
+                   help="how strongly a passage must stand out to be suggested as an answer")
+    p.add_argument("--formats", default="json,docx,txt", help="comma list of json,docx,txt")
 
 
 def main(argv: list[str] | None = None) -> int:

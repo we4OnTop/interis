@@ -18,8 +18,16 @@ import numpy as np
 
 import interis
 from interis._bootstrap import require_offline
+from interis.analysis.analyze import AnalysisOptions, analyze
 from interis.config import Paths
-from interis.models import ALIGN_MODEL, DIARIZATION_MODEL, MODELS, sha256_file, verify_ready
+from interis.models import (
+    ALIGN_MODEL,
+    DIARIZATION_MODEL,
+    EMBEDDING_MODEL,
+    MODELS,
+    sha256_file,
+    verify_ready,
+)
 from interis.pipeline.asr import AsrOptions
 from interis.pipeline.cache import StepCache, params_key
 from interis.pipeline.merge import build_turns
@@ -39,6 +47,7 @@ class PipelineOptions:
     diarize: bool = True
     num_speakers: int | None = 2
     interview_id: str | None = None
+    analysis: AnalysisOptions = field(default_factory=AnalysisOptions)
 
 
 def decode(path: Path) -> np.ndarray:
@@ -138,4 +147,32 @@ def run_pipeline(audio_path: Path, paths: Paths, opts: PipelineOptions,
         "platform": f"{platform.system()} {platform.release()} / Python "
                     f"{platform.python_version()}",
     }
-    return Transcript(meta=meta, speakers=speakers, turns=turns)
+    transcript = Transcript(meta=meta, speakers=speakers, turns=turns)
+    say("analyze", 0.0)
+    run_analysis(transcript, paths, opts.analysis,
+                 diarization.embeddings if diarization else None, opts.asr.threads)
+    say("analyze", 1.0)
+    return transcript
+
+
+def run_analysis(transcript: Transcript, paths: Paths, aopts: AnalysisOptions,
+                 speaker_embeddings: dict[str, list[float]] | None = None,
+                 threads: int | None = None) -> None:
+    """Run Phase 2 analysis and store it in ``transcript.analysis`` (in place).
+
+    Speaker embeddings are biometric data: they are used here but never written into
+    the transcript or any export."""
+    require_offline()
+
+    def encoder_factory():
+        from interis.analysis.embed import Encoder
+
+        return Encoder(verify_ready(paths, EMBEDDING_MODEL), threads)
+
+    transcript.analysis = analyze(transcript, aopts, speaker_embeddings, encoder_factory)
+    if aopts.guide is not None:
+        transcript.meta["models"][EMBEDDING_MODEL] = {
+            "repo": MODELS[EMBEDDING_MODEL].repo,
+            "revision": MODELS[EMBEDDING_MODEL].revision,
+            "license": MODELS[EMBEDDING_MODEL].license,
+        }

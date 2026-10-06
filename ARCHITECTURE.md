@@ -224,10 +224,47 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
   which this project uses exclusively (`python-preference = "only-managed"`).
 - **Alignment:** own CTC Viterbi (`pipeline/align.py`) instead of `torchaudio.functional.
   forced_align` (deprecated in torchaudio 2.9+).
-- **Measured on the dev PC (Ryzen 7 7800X3D), 48 s German TTS sample, turbo int8:** ASR
-  0.34× real time, ASR + alignment 0.25× (cached ASR). Text 100 % correct, 79/80 words
-  aligned (the unaligned one is the number "2019"). To be re-measured on the target laptop
-  with large-v3 and real recordings.
+- **Measured on the dev PC (Ryzen 7 7800X3D), German TTS samples, int8:**
+  - turbo: ASR 0.34× real time, ASR + alignment 0.25× (cached ASR);
+  - large-v3: ASR + alignment 0.76–0.89× real time;
+  - text 100 % correct with both models, 79/80 words aligned (the unaligned one is "2019").
+
+  Expect roughly 2–3× slower on the target laptop. Re-measure there with real recordings.
+
+## 6b. Phase 2 analysis (as built)
+
+`src/interis/analysis/`:
+- `sentences`: sentence split on Whisper punctuation (German abbreviations and ordinals
+  handled).
+- `questions`: German rules with reason codes:
+  - `question_mark`, `interrogative`, `verb_first`, `narrative_prompt`, `interest`;
+  - backchannels excluded.
+- `roles`:
+  - interviewer identified by voice profile (`interis enroll`, cosine similarity to pyannote
+    speaker centroids, ≥ 0.5 with ≥ 0.1 lead), otherwise by the highest share of question
+    sentences;
+  - voice embeddings are biometric data, so they stay in `<data>/voices` and are never
+    written to transcripts or exports.
+- `guide`: Markdown guide format (sections, codes, `~` variants, `>` planned probes).
+- `analyze`: asked questions → guide matching (main / probe / follow-up), direct answers
+  (main questions keep their follow-ups), and "answered elsewhere" suggestions
+  (anticipated / later / unasked).
+- **Embedding calibration** (German paraphrases, follow-ups, answer passages):
+
+  | model | correct matches | follow-ups | answer passage at rank 1 |
+  |---|---|---|---|
+  | e5-base | ≥ 0.887 | up to 0.898 (overlap) | 3/5 |
+  | **e5-large** | ≥ 0.904, lead ≥ 0.068 | ≤ 0.879, lead ≤ 0.033 | 3/5 |
+  | e5-large-instruct | ≥ 0.933, lead ≥ 0.054 | ≤ 0.907, lead ≤ 0.028 | 3/5 |
+
+  The resulting rules:
+  - **guide match:** score ≥ 0.89 and a lead ≥ 0.05 over the next guide question;
+  - **answer suggestions:** relative, i.e. z-score ≥ 1.5 among all interviewee passages of
+    the interview, plus a floor of 0.78, max 3 per question.
+- **End-to-end test** (2-minute German TTS interview, simulated diarization):
+  - all 6 interviewer questions were correctly marked (4 main, 1 planned probe, 1 ad-hoc
+    follow-up), with no false positives;
+  - the never-asked F3 was suggested at exactly the right passage ("unasked").
 
 ## 7. Repository layout
 

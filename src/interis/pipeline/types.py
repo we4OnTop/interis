@@ -77,12 +77,15 @@ class Transcript:
     meta: dict[str, Any]
     speakers: list[dict[str, Any]]
     turns: list[Turn]
+    # Phase 2 results: roles, questions, guide matches, answers, suggestions.
+    analysis: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "meta": self.meta,
             "speakers": self.speakers,
             "turns": [{**asdict(t), "text": t.text} for t in self.turns],
+            "analysis": self.analysis,
         }
 
     @staticmethod
@@ -91,7 +94,8 @@ class Transcript:
             Turn(t["speaker"], t["start"], t["end"], [Word(**w) for w in t["words"]])
             for t in d["turns"]
         ]
-        return Transcript(meta=d["meta"], speakers=d["speakers"], turns=turns)
+        return Transcript(meta=d["meta"], speakers=d["speakers"], turns=turns,
+                          analysis=d.get("analysis", {}))
 
 
 def to_dict(obj: Any) -> Any:

@@ -28,7 +28,7 @@ from typing import Literal
 from interis.config import Paths
 from interis.security.pickle_scan import assert_safe_checkpoint
 
-Kind = Literal["whisper", "pyannote", "wav2vec2"]
+Kind = Literal["whisper", "pyannote", "wav2vec2", "embedding"]
 Log = Callable[[str], None]
 
 
@@ -53,6 +53,11 @@ _WHISPER_FILES = (
     "special_tokens_map.json", "normalizer.json", "model.safetensors",
 )
 
+_E5_FILES = (
+    "config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json",
+    "special_tokens_map.json", "sentencepiece.bpe.model",
+)
+
 MODELS: dict[str, ModelSpec] = {
     s.key: s
     for s in (
@@ -71,12 +76,15 @@ MODELS: dict[str, ModelSpec] = {
                   ("config.json", "preprocessor_config.json", "vocab.json",
                    "special_tokens_map.json", "pytorch_model.bin"),
                   "Apache-2.0"),
+        ModelSpec("e5-large", "intfloat/multilingual-e5-large",
+                  "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3", "embedding", _E5_FILES, "MIT"),
     )
 }
 
 ASR_MODELS = ("whisper-large-v3", "whisper-large-v3-turbo")
 DIARIZATION_MODEL = "pyannote-community-1"
 ALIGN_MODEL = "wav2vec2-german"
+EMBEDDING_MODEL = "e5-large"
 
 
 class ModelError(Exception):
@@ -194,7 +202,7 @@ def _download(spec: ModelSpec, raw: Path, token: str | None) -> None:
     _verify_against_hub(spec, raw, token)
 
 
-def _prepare_whisper(raw: Path, out: Path) -> None:
+def _prepare_whisper(spec: ModelSpec, raw: Path, out: Path) -> None:
     from ctranslate2.converters import TransformersConverter
 
     converter = TransformersConverter(
@@ -205,7 +213,7 @@ def _prepare_whisper(raw: Path, out: Path) -> None:
     converter.convert(str(out), quantization="float16", force=True)
 
 
-def _prepare_wav2vec2(raw: Path, out: Path) -> None:
+def _prepare_wav2vec2(spec: ModelSpec, raw: Path, out: Path) -> None:
     assert_safe_checkpoint(raw / "pytorch_model.bin")
     from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
@@ -218,17 +226,22 @@ def _prepare_wav2vec2(raw: Path, out: Path) -> None:
         raise ModelError("wav2vec2 conversion did not produce a pure safetensors model")
 
 
-def _prepare_pyannote(raw: Path, out: Path) -> None:
+def _prepare_pyannote(spec: ModelSpec, raw: Path, out: Path) -> None:
     for ckpt in ("embedding/pytorch_model.bin", "segmentation/pytorch_model.bin"):
         assert_safe_checkpoint(raw / ckpt)
-    spec = MODELS[DIARIZATION_MODEL]
     for rel in spec.files:
         (out / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(raw / rel, out / rel)
 
 
+def _prepare_embedding(spec: ModelSpec, raw: Path, out: Path) -> None:
+    # Already safetensors; copy only the pinned files (no .cache metadata).
+    for rel in spec.files:
+        shutil.copy2(raw / rel, out / rel)
+
+
 _PREPARE = {"whisper": _prepare_whisper, "wav2vec2": _prepare_wav2vec2,
-            "pyannote": _prepare_pyannote}
+            "pyannote": _prepare_pyannote, "embedding": _prepare_embedding}
 
 
 def setup_model(paths: Paths, key: str, token: str | None, log: Log = print) -> None:
@@ -252,7 +265,7 @@ def setup_model(paths: Paths, key: str, token: str | None, log: Log = print) -> 
     _download(spec, raw, token)
     log(f"[{key}] download verified against the Hub, preparing …")
     staging.mkdir(parents=True)
-    _PREPARE[spec.kind](raw, staging)
+    _PREPARE[spec.kind](spec, raw, staging)
 
     shutil.rmtree(target, ignore_errors=True)
     os.replace(staging, target)
