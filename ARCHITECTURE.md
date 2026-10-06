@@ -266,6 +266,38 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
     follow-up), with no false positives;
   - the never-asked F3 was suggested at exactly the right passage ("unasked").
 
+## 6c. Review website (as built)
+
+The scope is focused on what matters for the thesis:
+1. where each question was asked;
+2. marking that an answer also answers another question (and that this question was
+   therefore left out);
+3. a side-by-side comparison of all interviews, synchronised per guide question.
+
+- **Frontend without npm:** plain HTML/CSS/JS in `src/interis/web/static/` (about 500
+  lines), served by FastAPI. This changes the earlier React/Vite plan. With zero
+  third-party frontend code there is no npm supply-chain risk and no Node toolchain.
+  Text is only inserted as text nodes, never as HTML.
+- **Backend:** FastAPI + uvicorn (Starlette 1.7). Decisions are stored in
+  `<data>/interis.db` (stdlib `sqlite3`): question corrections and manual marks
+  (`question_marks`), and "also answers" links with an `omitted` flag (`answer_links`).
+  Both are keyed by position (interview, turn, word range). Transcript JSONs stay untouched.
+- **Effective state** (`web/review.py`, pure functions) = machine analysis + your
+  decisions. Direct answers are recomputed after reassignments. Each link's type
+  (anticipated / later / unasked) is derived from when the question was actually asked.
+  Each cell status is one of asked / answered elsewhere / omitted / missing.
+- **Security as specified in §6:**
+  - bound to 127.0.0.1, Host allow-list;
+  - login token in the URL fragment, exchanged for an HttpOnly SameSite=Strict cookie;
+  - `X-Interis` header plus Origin check on writes;
+  - strict CSP, no API docs routes, input validation on every span and guide code.
+  - Tested in `tests/test_web.py`.
+- **Verified in a browser** with two German TTS interviews:
+  - the grid synchronises differently worded questions ("sensible Daten" → F3);
+  - linking via ↗ and via text selection works, "weggelassen – schon beantwortet" shows up;
+  - reassigning a follow-up to "F2 Nachfrage" works;
+  - audio streaming (HTTP 206) works.
+
 ## 7. Repository layout
 
 ```

@@ -100,6 +100,35 @@ Ergebnis:
   Frage beantwortet wurden.
 - Alle Markierungen sind **Vorschläge** und werden von dir geprüft.
 
+## Website: alle Interviews nebeneinander
+
+```powershell
+uv run interis serve            # öffnet den Browser; nur von diesem PC erreichbar
+```
+
+Den Leitfaden als `leitfaden.md` in den Datenordner legen oder mit `--guide` angeben.
+Nach Änderungen am Leitfaden einmal `uv run interis analyze --all` ausführen.
+
+**Vergleich (Splitscreen):** eine Zeile pro Leitfadenfrage, eine Spalte pro Interview. Jede
+Zelle zeigt:
+- wie und wann du die Frage gestellt hast;
+- die Antwort, einschließlich deiner Nachfragen;
+- Stellen, die die Frage *an anderer Stelle* beantworten (vorweg, später oder ohne Frage).
+
+Jede Stelle kannst du mit ▶ anhören.
+
+| Was du tun willst | So geht's |
+|---|---|
+| Eine Antwort beantwortet auch eine andere Frage | im Vergleich ↗ neben der Antwort, **oder** im Transkript den Text markieren → „Antwort auf Frage …“. Optional „Frage deshalb weggelassen“ ankreuzen |
+| Frage falsch zugeordnet (anders formuliert) | auf das blaue Fragen-Kürzel klicken → richtige Leitfadenfrage wählen |
+| Eine Frage wurde nicht erkannt | im Transkript markieren → „Als Frage markieren“ |
+| Etwas wurde fälschlich als Frage erkannt | Kürzel anklicken → „Ist keine Frage“ |
+| Automatischer Vorschlag | ✓ übernehmen oder ✕ verwerfen |
+
+Deine Entscheidungen werden in `interis.db` im Datenordner gespeichert. Die Transkripte
+selbst bleiben unverändert. Fehlt die Audiodatei eines Interviews:
+`uv run interis set-audio I01 X:\interis-data\audio\interview01.m4a`.
+
 ## Stimmprofil (damit du sicher als „Interviewer“ erkannt wirst)
 
 Etwa 60 Sekunden nur deine Stimme aufnehmen (z. B. einen Text vorlesen), dann:

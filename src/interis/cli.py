@@ -130,18 +130,56 @@ def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
     from interis.pipeline.run import run_analysis
     from interis.pipeline.types import Transcript
 
-    src = Path(args.transcript).resolve()
-    transcript = Transcript.from_dict(json.loads(src.read_text(encoding="utf-8")))
-    has_roles = any(s.get("role") in ("interviewer", "interviewee")
-                    for s in transcript.speakers)
-    try:
-        run_analysis(transcript, paths, _analysis_options(args, paths, not has_roles),
-                     threads=args.threads)
-    except ModelError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-    _write_outputs(transcript, src.parent, args.formats)
-    print(f"{_summary(transcript)}\nOutput: {src.parent}")
+    if args.all:
+        sources = [p for p in sorted(paths.exports.glob("*/*.json")) if p.stem == p.parent.name]
+    elif args.transcript:
+        sources = [Path(args.transcript).resolve()]
+    else:
+        print("ERROR: give a transcript JSON or --all", file=sys.stderr)
+        return 2
+    for src in sources:
+        transcript = Transcript.from_dict(json.loads(src.read_text(encoding="utf-8")))
+        has_roles = any(s.get("role") in ("interviewer", "interviewee")
+                        for s in transcript.speakers)
+        try:
+            run_analysis(transcript, paths, _analysis_options(args, paths, not has_roles),
+                         threads=args.threads)
+        except ModelError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        _write_outputs(transcript, src.parent, args.formats)
+        print(f"{transcript.meta['interview_id']}: {_summary(transcript)}")
+    return 0
+
+
+def cmd_serve(args: argparse.Namespace, paths: Paths) -> int:
+    import secrets
+    import webbrowser
+
+    import uvicorn
+
+    from interis.web.app import create_app
+
+    token = secrets.token_urlsafe(24)
+    app = create_app(paths, token, args.port, Path(args.guide) if args.guide else None)
+    # The token sits in the URL fragment: browsers never send fragments to the server.
+    url = f"http://127.0.0.1:{args.port}/#login={token}"
+    print(f"Interis läuft nur auf diesem Rechner: {url}\n(Beenden mit Strg+C)")
+    if not args.no_browser:
+        webbrowser.open(url)
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning", access_log=False)
+    return 0
+
+
+def cmd_set_audio(args: argparse.Namespace, paths: Paths) -> int:
+    from interis.web.store import Store
+
+    audio = Path(args.audio).resolve()
+    if not audio.is_file():
+        print(f"ERROR: file not found: {audio}", file=sys.stderr)
+        return 2
+    Store(paths.root / "interis.db").register_interview(args.id, audio)
+    print(f"Audio for {args.id}: {audio}")
     return 0
 
 
@@ -175,6 +213,9 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
 
     out_dir = paths.exports / transcript.meta["interview_id"]
     _write_outputs(transcript, out_dir, args.formats)
+    from interis.web.store import Store
+
+    Store(paths.root / "interis.db").register_interview(transcript.meta["interview_id"], audio)
     elapsed = time.monotonic() - started
     duration = transcript.meta["audio"]["duration_s"]
     print(f"{_summary(transcript)}")
@@ -219,10 +260,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("analyze", help="re-run question/guide analysis on a transcript JSON "
                                        "(e.g. after editing the guide)")
-    p.add_argument("transcript", help="path to <ID>.json")
+    p.add_argument("transcript", nargs="?", help="path to <ID>.json")
+    p.add_argument("--all", action="store_true", help="all transcripts in the data directory")
     p.add_argument("--threads", type=int, help="CPU threads (default: all)")
     _add_analysis_args(p)
     p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("serve", help="open the review website (only reachable from this PC)")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--guide", help="interview guide (default: <data>/leitfaden.md)")
+    p.add_argument("--no-browser", action="store_true", help="do not open the browser")
+    p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("set-audio", help="link an interview to its audio file (for playback)")
+    p.add_argument("id", help="interview ID, e.g. I01")
+    p.add_argument("audio", help="audio file")
+    p.set_defaults(func=cmd_set_audio)
 
     p = sub.add_parser("enroll", help="create your voice profile from a recording of only "
                                       "your voice (~60 s)")
