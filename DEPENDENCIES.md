@@ -78,19 +78,31 @@ Package-manager hardening (`web/.npmrc` / `pnpm-workspace.yaml`):
 |---|---|---|---|---|
 | **openai/whisper-large-v3** | final, max-precision ASR | Official OpenAI repo | MIT | safetensors → **converted locally** to CTranslate2 with `ct2-transformers-converter`. We don't depend on third-party pre-converted repos. |
 | **openai/whisper-large-v3-turbo** | fast draft ASR | Official OpenAI repo | MIT | Same local conversion. |
-| **pyannote/speaker-diarization-community-1** | diarization + embeddings | pyannote (gated: free HF account + accept conditions once) | CC-BY-4.0 (attribution in thesis) | Pinned revision. The setup verifies file hashes. |
-| German wav2vec2 aligner: torchaudio `VOXPOPULI_ASR_BASE_10K_DE` (WhisperX default for `de`) **or** `jonatasgrosman/wav2vec2-large-xlsr-53-german` | word-level forced alignment | PyTorch / widely used community model (basis of WhisperX German alignment) | BSD / Apache-2.0 | Both ship **pickle checkpoints only** (`.pt` / `pytorch_model.bin`). They are loaded once with torch ≥ 2.10 `weights_only=True` and **converted to safetensors**, and only that file is used afterwards. Choice made in Phase 1 by measuring timing precision. |
-| **intfloat/multilingual-e5-base** | sentence embeddings (question matching, answer suggestions) | Microsoft Research | MIT | Use safetensors (verify presence at setup, otherwise convert). |
+| **pyannote/speaker-diarization-community-1** | diarization + embeddings | pyannote (gated: free HF account + accept conditions once) | CC-BY-4.0 (attribution in thesis) | Pinned revision, Hub hashes verified. ⚠ **pyannote 4.0.7 loads its checkpoints with `torch.load(weights_only=False)`** (`core/model.py`), i.e. full pickle, and we cannot change that without forking. Mitigations: pinned official revision, sha256 check before every use, and Interis' own **static pickle scanner** (`security/pickle_scan.py`) that rejects any checkpoint importing non-allowlisted globals (e.g. `os.system`, `builtins.eval`, getattr chains), run at setup and before every load. |
+| German wav2vec2 aligner: **`jonatasgrosman/wav2vec2-large-xlsr-53-german`** (implemented) | word-level forced alignment | widely used community model | Apache-2.0 | Ships a **pickle checkpoint only** (`pytorch_model.bin`). It is scanned, loaded once via transformers (torch ≥ 2.10 `weights_only` loading), **re-saved as safetensors**, and the `.bin` is deleted. Afterwards it is loaded with `use_safetensors=True` only. |
+| **intfloat/multilingual-e5-base** (Phase 2) | sentence embeddings (question matching, answer suggestions) | Microsoft Research | MIT | Has `model.safetensors`. |
 | Silero VAD | voice activity detection | bundled inside faster-whisper (ONNX) | MIT | No download. |
 
-`models.lock.json` records repo, commit revision and sha256 per file. The worker refuses to
-start on a mismatch.
+Pinned revisions live in `src/interis/models.py`. After preparation, the sha256 of every
+prepared file is written to `<data>/models/models.lock.json`. Conversions are machine-
+specific, so this file lives in the data directory, not the repo. Every pipeline run checks
+the hashes and refuses to start on any difference, including extra files.
+
+### TLS interception (found on the development PC)
+
+On the development machine, **Kaspersky Anti-Virus** re-signs all HTTPS traffic with its own
+root certificate ("Kaspersky Anti-Virus Personal Root Certificate"). Python correctly refuses
+these connections. `interis setup-models --use-system-certs` verifies TLS against the Windows
+certificate store via [`truststore`](https://github.com/sethmlarson/truststore), which pip
+itself vendors. It is never `verify=False`. This is only relevant for the one-time model
+download. Interview data never goes over the network.
 
 ## 6. Host tools
 
 | Tool | Purpose | Notes |
 |---|---|---|
-| Python 3.11 (python.org installer) | runtime | 3.11 is supported by torch 2.10. Keep patch releases current. |
+| Python 3.11, **uv-managed** (`python-preference = "only-managed"`) | runtime | Not the Microsoft Store Python. A Windows venv's `python.exe` is only a launcher, so the firewall rule must target the *base* interpreter. A dedicated uv-managed interpreter keeps that rule specific. |
+| **truststore** | OS certificate store for the setup download | Opt-in via `--use-system-certs`. Same library pip vendors. |
 | **uv** (Astral) | env + lockfile | `[tool.uv] exclude-newer = "7 days"` (dependency cooldown), `uv sync --locked`. |
 | Node.js LTS + pnpm | frontend build only | Not needed at runtime. |
 | **VeraCrypt** | encrypted data container | Open source, independently audited (Quarkslab 2016, Fraunhofer SIT for BSI 2020). |
@@ -101,11 +113,13 @@ start on a mismatch.
 - [ ] `PYANNOTE_METRICS_ENABLED=0`, `HF_HUB_OFFLINE=1`, `HF_HUB_DISABLE_TELEMETRY=1`,
       `TRANSFORMERS_OFFLINE=1`, `OTEL_SDK_DISABLED=true` are active in the worker
 - [ ] Network guard active; a test connection to a public IP is blocked
-- [ ] Firewall outbound rule present for the venv `python.exe`
+- [ ] Firewall outbound rule present for the base interpreter behind the venv `python.exe`
 - [ ] Data dir is on the VeraCrypt volume and **not** under a OneDrive-synced folder
 - [ ] Server listens on 127.0.0.1 only; a Host-header test with `evil.example` is rejected
 - [ ] `models.lock.json` hashes match
-- [ ] `pip-audit` / `pnpm audit` clean (or accepted findings documented)
+- [ ] `pip-audit` / `pnpm audit` clean (or accepted findings documented). pip-audit skips
+      `torch`/`torchaudio` because of the `+cpu` local version, so check those two on
+      [osv.dev](https://osv.dev). (2026-10-06: torch 2.14.0 and torchaudio 2.11.0 have 0 known vulns.)
 
 ## Sources
 

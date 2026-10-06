@@ -209,6 +209,26 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
   can read page content.
 - Backups: copy the encrypted container itself, never the mounted plain files.
 
+## 6a. Implementation notes (Phase 0/1, as built)
+
+- **Data dir is mandatory:** `INTERIS_DATA_DIR` or `--data-dir`. There is no default, so data
+  never lands somewhere unintended. `HF_HOME`, `TORCH_HOME` and `TMP`/`TEMP` are redirected
+  into it.
+- **Model lock** lives at `<data>/models/models.lock.json`, not in the repo, because local
+  conversions are machine-specific. Pinned revisions are in `src/interis/models.py`.
+- **Pickle scanner** (`security/pickle_scan.py`): static allowlist check of every `.bin`
+  checkpoint (wav2vec2 at setup; pyannote at setup **and before every load**, because pyannote
+  4.0.7 uses `torch.load(weights_only=False)`).
+- **Firewall:** a Windows venv `python.exe` is a launcher, and the real process is the base
+  interpreter. `scripts/firewall.ps1` therefore blocks the uv-managed base interpreter,
+  which this project uses exclusively (`python-preference = "only-managed"`).
+- **Alignment:** own CTC Viterbi (`pipeline/align.py`) instead of `torchaudio.functional.
+  forced_align` (deprecated in torchaudio 2.9+).
+- **Measured on the dev PC (Ryzen 7 7800X3D), 48 s German TTS sample, turbo int8:** ASR
+  0.34× real time, ASR + alignment 0.25× (cached ASR). Text 100 % correct, 79/80 words
+  aligned (the unaligned one is the number "2019"). To be re-measured on the target laptop
+  with large-v3 and real recordings.
+
 ## 7. Repository layout
 
 ```
