@@ -112,9 +112,30 @@ class JobRunner:
             raise RuntimeError("Transkript nicht gefunden")
         return [*base, "analyze", str(transcript), *guide_args]
 
+    def _write_edits(self, job: dict, path: Path) -> bool:
+        """The word edits of an interview as a temporary JSON file (no transcript text is
+        logged). False if there are no edits."""
+        rows = [{k: e[k] for k in ("turn", "word", "action", "kind", "text", "tag")}
+                for e in self.store.word_edits(job["interview_id"])]
+        if not rows:
+            return False
+        self.paths.tmp.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+        return True
+
     def _run(self, job: dict) -> None:
-        job_id = job["id"]
         cmd = self.command(job)
+        edits_file = self.paths.tmp / f"edits-{job['id']}.json"
+        try:
+            # The analysis runs on the edited text; the transcript itself is never changed.
+            if job["kind"] == "analyze" and self._write_edits(job, edits_file):
+                cmd = [*cmd, "--edits", str(edits_file)]
+            self._execute(job, cmd)
+        finally:
+            edits_file.unlink(missing_ok=True)
+
+    def _execute(self, job: dict, cmd: list[str]) -> None:
+        job_id = job["id"]
         self.store.update_job(job_id, status="running", stage="start", progress=0.0,
                               message="")
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}

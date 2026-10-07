@@ -11,6 +11,7 @@ from typing import Any
 from interis.analysis.analyze import AskedQuestion, _direct_answers
 from interis.analysis.guide import Guide
 from interis.pipeline.types import Transcript
+from interis.web.edits import EMPTY_DIGEST, apply_edits, edits_digest
 
 
 def interviewer_of(t: Transcript) -> str | None:
@@ -18,13 +19,23 @@ def interviewer_of(t: Transcript) -> str | None:
 
 
 def passage(t: Transcript, turn: int, first: int, last: int) -> dict[str, Any]:
-    words = t.turns[turn].words[first:last + 1]
+    tu = t.turns[turn]
+    words = tu.words[first:last + 1]
+    if not words:  # positions outside the turn: an empty passage at the turn's bounds
+        return {"turn": turn, "first": first, "last": last, "start": tu.start, "end": tu.end,
+                "text": ""}
     return {"turn": turn, "first": first, "last": last, "start": words[0].start,
             "end": words[-1].end, "text": "".join(w.text for w in words).strip()}
 
 
+def edits_stale(t: Transcript, edits: list[dict[str, Any]]) -> bool:
+    """True if the analysis was made before the current word edits."""
+    return edits_digest(edits) != t.analysis.get("edits_digest", EMPTY_DIGEST)
+
+
 def effective_questions(t: Transcript, marks: list[dict[str, Any]]) -> list[AskedQuestion]:
-    """Machine-detected questions with your corrections applied, plus your own marks."""
+    """Machine-detected questions with your corrections applied, plus your own marks.
+    ``t`` must be the effective transcript (see :func:`apply_edits`)."""
     by_key = {(m["turn"], m["first"]): m for m in marks}
     out: list[AskedQuestion] = []
     for raw in t.analysis.get("questions", []):
@@ -35,8 +46,8 @@ def effective_questions(t: Transcript, marks: list[dict[str, Any]]) -> list[Aske
                 continue
             q = replace(q, last=mark["last"], guide_code=mark["guide_code"],
                         match=mark["match"], status="confirmed")
-            p = passage(t, q.turn, q.first, q.last)
-            q.end, q.text = p["end"], p["text"]
+        p = passage(t, q.turn, q.first, q.last)
+        q.end, q.text = p["end"], p["text"]
         out.append(q)
     for mark in by_key.values():
         if mark["status"] == "rejected":
@@ -81,8 +92,14 @@ def _dialogue(t: Transcript, start_turn: int, end_turn: int,
 
 
 def interview_state(t: Transcript, marks: list[dict[str, Any]],
-                    links: list[dict[str, Any]], guide: Guide | None) -> dict[str, Any]:
-    """Everything the comparison view needs for one interview, keyed by guide code."""
+                    links: list[dict[str, Any]], guide: Guide | None,
+                    edits: list[dict[str, Any]] | None = None,
+                    decisions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Everything the comparison view needs for one interview, keyed by guide code.
+    Works on the effective transcript: word edits applied first (see ``apply_edits``)."""
+    t = apply_edits(t, edits or [])
+    decided = {d["guide_code"]: {"reason": d["reason"], "note": d["note"]}
+               for d in decisions or []}
     questions = effective_questions(t, marks)
     interviewer = interviewer_of(t)
     direct = _direct_answers(t, questions, interviewer) if interviewer else []
@@ -100,7 +117,7 @@ def interview_state(t: Transcript, marks: list[dict[str, Any]],
         if q.match == "main" and q.guide_code:
             first_asked.setdefault(q.guide_code, q.start)
 
-    decided = {(lk["guide_code"], lk["turn"], lk["first"], lk["last"]) for lk in links}
+    linked = {(lk["guide_code"], lk["turn"], lk["first"], lk["last"]) for lk in links}
     cells: dict[str, dict[str, Any]] = {}
     codes = [g.code for g in guide.questions] if guide else []
     for code in codes:
@@ -129,7 +146,7 @@ def interview_state(t: Transcript, marks: list[dict[str, Any]],
         for s in t.analysis.get("suggestions", []):
             p0 = s["passages"][0]
             key = (code, p0["turn"], p0["first"], p0["last"])
-            if s["guide_code"] != code or key in decided or p0["turn"] in own_turns:
+            if s["guide_code"] != code or key in linked or p0["turn"] in own_turns:
                 continue
             suggestions.append({**describe({"turn": p0["turn"], "first": p0["first"],
                                             "last": p0["last"]}),
@@ -140,10 +157,12 @@ def interview_state(t: Transcript, marks: list[dict[str, Any]],
             status = "omitted"
         elif confirmed:
             status = "answered_elsewhere"
+        elif code in decided:
+            status = "explained"
         else:
             status = "missing"
         cells[code] = {"status": status, "exchanges": exchanges, "links": confirmed,
-                       "suggestions": suggestions}
+                       "suggestions": suggestions, "decision": decided.get(code)}
 
     unassigned = [asdict(q) for q in questions if not (q.match in ("main", "probe")
                                                        and q.guide_code)]

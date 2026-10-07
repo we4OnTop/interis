@@ -136,10 +136,24 @@ def cmd_enroll(args: argparse.Namespace, paths: Paths) -> int:
     return 0
 
 
+def _load_edits(path: str) -> list[dict]:
+    """Word edits written by the website (a JSON list of {turn, word, action, text, ...})."""
+    from interis.web.edits import ACTIONS
+
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    valid = isinstance(data, list) and all(
+        isinstance(e, dict) and isinstance(e.get("turn"), int) and isinstance(e.get("word"), int)
+        and e.get("action") in ACTIONS and isinstance(e.get("text", ""), str) for e in data)
+    if not valid:
+        raise ValueError("edits file: expected a list of {turn, word, action, text}")
+    return data
+
+
 def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
     from interis.models import ModelError
     from interis.pipeline.run import run_analysis
     from interis.pipeline.types import Transcript
+    from interis.web.edits import apply_edits, edits_digest
 
     if args.all:
         sources = [p for p in sorted(paths.exports.glob("*/*.json")) if p.stem == p.parent.name]
@@ -148,18 +162,29 @@ def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
     else:
         print("ERROR: give a transcript JSON or --all", file=sys.stderr)
         return 2
+    if args.edits and len(sources) != 1:
+        print("ERROR: --edits belongs to one transcript", file=sys.stderr)
+        return 2
+    try:
+        edits = _load_edits(args.edits) if args.edits else []
+    except (OSError, ValueError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
     for src in sources:
-        transcript = Transcript.from_dict(json.loads(src.read_text(encoding="utf-8")))
+        raw = Transcript.from_dict(json.loads(src.read_text(encoding="utf-8")))
         has_roles = any(s.get("role") in ("interviewer", "interviewee")
-                        for s in transcript.speakers)
+                        for s in raw.speakers)
+        effective = apply_edits(raw, edits)  # the analysis sees the edited text
         try:
-            run_analysis(transcript, paths, _analysis_options(args, paths, not has_roles),
+            run_analysis(effective, paths, _analysis_options(args, paths, not has_roles),
                          threads=args.threads)
         except ModelError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
-        _write_outputs(transcript, src.parent, args.formats)
-        print(f"{transcript.meta['interview_id']}: {_summary(transcript)}")
+        # Only the analysis goes back into the transcript; its words stay as recorded.
+        raw.analysis = {**effective.analysis, "edits_digest": edits_digest(edits)}
+        _write_outputs(raw, src.parent, args.formats)
+        print(f"{raw.meta['interview_id']}: {_summary(raw)}")
     return 0
 
 
@@ -285,6 +310,8 @@ def build_parser() -> argparse.ArgumentParser:
                                        "(e.g. after editing the guide)")
     p.add_argument("transcript", nargs="?", help="path to <ID>.json")
     p.add_argument("--all", action="store_true", help="all transcripts in the data directory")
+    p.add_argument("--edits", help="JSON list of word edits (corrections, smoothing); the "
+                                   "analysis then runs on the edited text")
     p.add_argument("--threads", type=int, help="CPU threads (default: all)")
     _add_analysis_args(p)
     p.set_defaults(func=cmd_analyze)
