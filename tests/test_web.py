@@ -48,9 +48,9 @@ def test_foreign_host_header_is_rejected(data_dir):
 
 def test_api_requires_login(data_dir):
     c = TestClient(create_app(data_dir, TOKEN, 8765), base_url=BASE)
-    assert c.get("/api/overview").status_code == 401
+    assert c.get("/api/projects").status_code == 401
     assert c.post("/api/login", json={"token": "wrong"}, headers=H).status_code == 401
-    assert c.get("/api/overview").status_code == 401
+    assert c.get("/api/projects").status_code == 401
 
 
 def test_session_cookie_is_httponly_and_strict(data_dir):
@@ -88,7 +88,7 @@ def test_input_validation(client):
 # ------------------------------------------------------------------ review logic
 
 def _cell(client, code):
-    return client.get("/api/compare").json()["cells"]["T1"][code]
+    return client.get("/api/projects/1/compare").json()["cells"]["T1"][code]
 
 
 def test_compare_shows_asked_questions_with_dialogue(client):
@@ -155,3 +155,178 @@ def test_audio_streaming_with_range(client, data_dir, tmp_path):
     Store(data_dir.root / "interis.db").register_interview("T1", audio)
     r = client.get("/api/interviews/T1/audio", headers={"Range": "bytes=0-9"})
     assert r.status_code == 206 and len(r.content) == 10
+
+
+# ------------------------------------------------------------------ projects, upload, jobs
+
+def test_existing_interviews_are_adopted_into_a_project(client):
+    projects = client.get("/api/projects").json()
+    assert [p["name"] for p in projects] == ["Bestehende Interviews"]
+    assert projects[0]["questions"] == 4 and projects[0]["transcribed"] == 1
+    p = client.get("/api/projects/1").json()
+    assert p["interviews"][0]["id"] == "T1" and p["next_id"] == "I01"
+
+
+def test_create_project_and_save_guide(client):
+    pid = client.post("/api/projects", headers=H, json={"name": "Neu"}).json()["id"]
+    assert client.get(f"/api/projects/{pid}").json()["guide"] is None
+    r = client.put(f"/api/projects/{pid}/guide", headers=H, json={"text": "nur Text"})
+    assert r.status_code == 422
+    r = client.put(f"/api/projects/{pid}/guide", headers=H, json={"text": GUIDE})
+    assert r.json() == {"questions": 4, "reanalyze": 0}
+    assert client.get(f"/api/projects/{pid}").json()["guide_text"] == GUIDE
+
+
+def test_guide_change_queues_reanalysis(client, data_dir):
+    client.put("/api/projects/1/guide", headers=H, json={"text": GUIDE + "- F5: Noch was?\n"})
+    jobs = Store(data_dir.root / "interis.db").jobs()
+    assert [(j["kind"], j["interview_id"], j["status"]) for j in jobs] == \
+        [("analyze", "T1", "queued")]
+    # no duplicate while one is pending
+    assert client.post("/api/projects/1/reanalyze", headers=H).json() == {"reanalyze": 0}
+
+
+def test_upload_stores_audio_under_id_and_queues_transcription(client, data_dir):
+    r = client.post("/api/projects/1/interviews?interview=I01&ext=M4A", headers=H,
+                    content=b"\x00" * 5000)
+    assert r.status_code == 200
+    store = Store(data_dir.root / "interis.db")
+    assert store.audio_path("I01") == data_dir.audio / "I01.m4a"
+    assert (data_dir.audio / "I01.m4a").stat().st_size == 5000
+    assert store.project_of("I01") == 1
+    job = store.jobs(["I01"])[0]
+    assert job["kind"] == "transcribe" and job["options"] == {"model": "whisper-large-v3"}
+    row = next(i for i in client.get("/api/projects/1").json()["interviews"] if i["id"] == "I01")
+    assert not row["transcribed"] and row["job"]["queue_pos"] == 0
+
+
+@pytest.mark.parametrize("query, status", [
+    ("interview=I01&ext=exe", 422),
+    ("interview=../x&ext=wav", 422),
+    ("interview=T1&ext=wav", 409),               # already exists
+    ("interview=I02&ext=wav&model=evil", 422),
+])
+def test_upload_rejects_bad_input(client, data_dir, query, status):
+    r = client.post(f"/api/projects/1/interviews?{query}", headers=H, content=b"x")
+    assert r.status_code == status
+    assert not any(data_dir.audio.glob("*")) if data_dir.audio.exists() else True
+
+
+def test_upload_needs_csrf_header(client):
+    r = client.post("/api/projects/1/interviews?interview=I01&ext=wav", content=b"x")
+    assert r.status_code == 403
+
+
+def test_docx_guide_import(client):
+    import io
+
+    from docx import Document
+
+    doc = Document()
+    doc.add_heading("Einstieg", level=2)
+    doc.add_paragraph("Vorab ein paar Worte zum Ablauf.")
+    doc.add_paragraph("Wie sieht Ihr Arbeitsalltag aus?")
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Welche Rolle spielt KI?"
+    buf = io.BytesIO()
+    doc.save(buf)
+    r = client.post("/api/guide/import-docx", headers=H, content=buf.getvalue())
+    text = r.json()["text"]
+    assert "## Einstieg" in text and "- Wie sieht Ihr Arbeitsalltag aus?" in text
+    assert "- Welche Rolle spielt KI?" in text and "- Vorab" not in text
+    assert client.post("/api/guide/import-docx", headers=H, content=b"nope").status_code == 422
+
+
+def test_job_runner_runs_cancels_and_reports(data_dir, tmp_path):
+    import sys
+    import time
+
+    from interis.web.jobs import JobRunner
+
+    store = Store(data_dir.root / "interis.db")
+    script = ("import json,time\n"
+              "print(json.dumps({'stage': 'transcribe', 'fraction': 1.0}), flush=True)\n"
+              "print('fertig', flush=True)\n")
+
+    class Fake(JobRunner):
+        def command(self, job):
+            if job["options"].get("fail"):
+                return [sys.executable, "-c", "print('ERROR: kaputt'); raise SystemExit(1)"]
+            if job["options"].get("slow"):
+                return [sys.executable, "-c", "import time; time.sleep(30)"]
+            return [sys.executable, "-c", script]
+
+    runner = Fake(data_dir, store, lambda _i: None, lambda _i: "")
+    ok = store.add_job("transcribe", "A")
+    bad = store.add_job("transcribe", "B", {"fail": True})
+    slow = store.add_job("transcribe", "C", {"slow": True})
+    runner.start()
+    try:
+        deadline = time.time() + 30
+        while store.job(slow)["status"] != "running" and time.time() < deadline:
+            time.sleep(0.1)
+        assert runner.cancel(slow)
+        while store.job(slow)["status"] == "running" and time.time() < deadline:
+            time.sleep(0.1)
+    finally:
+        runner.stop()
+    assert store.job(ok)["status"] == "done" and store.job(ok)["message"] == "fertig"
+    assert store.job(ok)["stage"] == "transcribe"
+    assert store.job(bad)["status"] == "failed" and "kaputt" in store.job(bad)["message"]
+    assert store.job(slow)["status"] == "cancelled"
+
+
+def test_job_command_uses_project_guide_and_hotwords(data_dir):
+    import sys
+
+    from interis.web.jobs import JobRunner
+
+    store = Store(data_dir.root / "interis.db")
+    pid = store.create_project("P", "Müller SAP")
+    audio = data_dir.root / "a.wav"
+    audio.write_bytes(b"RIFF")
+    store.add_interview("I01", pid, audio)
+    guide = data_dir.root / "g.md"
+    runner = JobRunner(data_dir, store, lambda _i: guide, lambda _i: "Müller SAP")
+    cmd = runner.command(store.job(store.add_job("transcribe", "I01",
+                                                 {"model": "whisper-large-v3-turbo"})))
+    assert cmd[:3] == [sys.executable, "-m", "interis.cli"]
+    assert cmd[cmd.index("--id") + 1] == "I01"
+    assert cmd[cmd.index("--guide") + 1] == str(guide)
+    assert cmd[cmd.index("--hotwords") + 1] == "Müller SAP"
+    assert cmd[cmd.index("--model") + 1] == "whisper-large-v3-turbo"
+    assert "--progress-json" in cmd
+
+
+def test_old_database_gets_project_column(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "interis.db"
+    with sqlite3.connect(db) as c:
+        c.execute("CREATE TABLE interviews (id TEXT PRIMARY KEY, audio_path TEXT, "
+                  "added_at TEXT NOT NULL)")
+        c.execute("INSERT INTO interviews VALUES ('X', NULL, 'now')")
+    store = Store(db)
+    assert store.project_of("X") is None
+    store.assign_project(["X"], store.create_project("P"))
+    assert store.project_of("X") == 1
+
+
+def test_delete_interview_removes_files_and_decisions(client, data_dir):
+    client.post("/api/projects/1/interviews?interview=I01&ext=wav", headers=H, content=b"abc")
+    store = Store(data_dir.root / "interis.db")
+    job = store.jobs(["I01"])[0]["id"]
+    assert client.delete("/api/interviews/I01", headers=H).status_code == 409  # job pending
+    client.post(f"/api/jobs/{job}/cancel", headers=H)
+    assert client.delete("/api/interviews/I01", headers=H).status_code == 200
+    assert not (data_dir.audio / "I01.wav").exists() and store.project_of("I01") is None
+
+    outside = data_dir.root / "original.wav"
+    outside.write_bytes(b"RIFF")
+    store.register_interview("T1", outside)
+    client.post("/api/links", headers=H, json={"interview": "T1", "turn": 1, "first": 0,
+                                               "last": 2, "guide_code": "F4"})
+    assert client.delete("/api/interviews/T1", headers=H).status_code == 200
+    assert outside.exists(), "recordings outside the upload folder are never deleted"
+    assert not (data_dir.exports / "T1").exists() and store.links("T1") == []
+    assert client.delete("/api/interviews/..", headers=H).status_code in (404, 405)

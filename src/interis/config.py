@@ -33,6 +33,11 @@ class Paths:
         return self.root / "exports"
 
     @property
+    def audio(self) -> Path:
+        """Recordings uploaded through the website (named by interview ID only)."""
+        return self.root / "audio"
+
+    @property
     def tmp(self) -> Path:
         return self.root / "tmp"
 

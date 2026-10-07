@@ -128,3 +128,39 @@ dialog .row { display: flex; gap: 12px; align-items: center; margin: 6px 0; flex
 dialog .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px;
                   flex-wrap: wrap; }
 dialog .hint { font-size: 12px; color: var(--muted); }
+
+/* ------------------------------------------------------------ projects & setup */
+.pname { font-weight: 600; margin-right: 6px; }
+.page { max-width: 1200px; margin: 0 auto; padding: 16px; }
+.page h2 { margin: 4px 0 8px; }
+.box { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px;
+       margin: 14px 0; }
+.box h3 { margin: 0 0 10px; font-size: 15px; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+.field { display: flex; flex-direction: column; gap: 3px; margin: 6px 0; color: var(--muted);
+         font-size: 12px; }
+.field input, .field select { font: inherit; color: #1d2433; }
+input[type=text], select, textarea { font: inherit; border: 1px solid var(--line);
+                                     border-radius: 6px; padding: 4px 6px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.card { display: block; background: #fff; border: 1px solid var(--line); border-radius: 8px;
+        padding: 12px 16px; text-decoration: none; color: inherit; }
+.card:hover { border-color: var(--q); }
+.card h3 { margin: 0 0 6px; color: var(--q); }
+.running { color: var(--sug); }
+.ok { color: var(--link); }
+.guide-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px; }
+.guide-edit { width: 100%; font-family: ui-monospace, Consolas, monospace; font-size: 13px;
+              resize: vertical; }
+.guide-preview { border: 1px solid var(--line); border-radius: 6px; padding: 8px;
+                 max-height: 32em; overflow: auto; background: #fbfcfd; }
+.guide-preview .psec { font-weight: 600; margin: 10px 0 4px; }
+.guide-preview .pq { margin: 4px 0; }
+.guide-preview .code { font-weight: 700; color: var(--q); margin-right: 6px; }
+.guide-preview .variants { color: var(--muted); font-size: 12px; margin-left: 30px; }
+details pre { background: #f3f5f8; padding: 8px; border-radius: 6px; }
+table.jobs { border-collapse: collapse; width: 100%; }
+table.jobs th, table.jobs td { text-align: left; padding: 6px 8px;
+                               border-bottom: 1px solid var(--line); vertical-align: top; }
+table.jobs progress { display: block; width: 260px; margin-top: 4px; }
+table.jobs .acts { white-space: nowrap; display: flex; gap: 8px; align-items: center; }

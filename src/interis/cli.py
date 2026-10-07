@@ -31,6 +31,20 @@ def _progress_printer():
     return report
 
 
+def _progress_json():
+    """Machine-readable progress for the website's job runner (one JSON object per line)."""
+    state = {"stage": None, "last": 0.0}
+
+    def report(stage: str, fraction: float) -> None:
+        now = time.monotonic()
+        if stage == state["stage"] and fraction < 1.0 and now - state["last"] < 1.0:
+            return
+        state.update(stage=stage, last=now)
+        print(json.dumps({"stage": stage, "fraction": round(fraction, 4)}), flush=True)
+
+    return report
+
+
 def cmd_setup_models(args: argparse.Namespace, paths: Paths) -> int:
     from interis.models import MODELS, ModelError, setup_model
 
@@ -206,7 +220,8 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
     )
     started = time.monotonic()
     try:
-        transcript = run_pipeline(audio, paths, opts, _progress_printer())
+        progress = _progress_json() if args.progress_json else _progress_printer()
+        transcript = run_pipeline(audio, paths, opts, progress)
     except ModelError as e:
         print(f"\nERROR: {e}", file=sys.stderr)
         return 1
@@ -259,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--threads", type=int, help="CPU threads (default: all)")
     p.add_argument("--no-align", action="store_true", help="skip word alignment")
     p.add_argument("--no-diarize", action="store_true", help="skip speaker diarization")
+    p.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
     _add_analysis_args(p)
     p.set_defaults(func=cmd_transcribe)
 

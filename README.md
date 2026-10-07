@@ -112,8 +112,25 @@ Ergebnis:
 uv run interis serve            # öffnet den Browser; nur von diesem PC erreichbar
 ```
 
-Den Leitfaden als `leitfaden.md` in den Datenordner legen oder mit `--guide` angeben.
-Nach Änderungen am Leitfaden einmal `uv run interis analyze --all` ausführen.
+**Projekte:** Ein Projekt besteht aus einem Interviewleitfaden und den Interviews dazu.
+Alles läuft über die Website, die Kommandozeile ist nicht nötig:
+
+1. „Neues Projekt“ anlegen.
+2. Unter **Leitfaden & Interviews** den Leitfaden eingeben oder als Datei laden (`.docx`,
+   `.md`, `.txt`). Rechts siehst du sofort, welche Fragen erkannt wurden. „Jede Zeile als
+   Frage“ macht aus einer einfachen Liste Leitfadenfragen. Optional ein Glossar mit Namen
+   und Fachbegriffen eintragen.
+3. Aufnahme auswählen, Kürzel vergeben (z. B. `I01`), „Hochladen & transkribieren“. Die
+   Aufnahme wird als `audio\I01.<endung>` in den Datenordner kopiert; der Dateiname wird
+   nicht übernommen. Die Transkription läuft im Hintergrund, eine nach der anderen, mit
+   Fortschrittsanzeige. Abbrechen und erneut starten sind möglich; bereits fertige
+   Schritte bleiben zwischengespeichert.
+4. Wird der Leitfaden später geändert, werden die Interviews automatisch neu analysiert
+   (ohne neu zu transkribieren).
+
+🗑 entfernt ein Interview wieder: Transkript, Zwischenergebnisse, Markierungen und die
+hochgeladene Kopie. Die Originaldatei bleibt unberührt. Interviews, die über die
+Kommandozeile transkribiert wurden, landen im Projekt „Bestehende Interviews“.
 
 **Vergleich (Splitscreen):** eine Zeile pro Leitfadenfrage, eine Spalte pro Interview. Jede
 Zelle zeigt:

@@ -68,11 +68,14 @@ function tagText(code, match) {
 
 // ------------------------------------------------------------------ state
 const state = {
-  overview: null,
+  overview: null,   // /api/projects/{pid} of the open project
+  pid: null,
   hidden: new Set(JSON.parse(localStorage.getItem("interis.hidden") || "[]")),
   showSuggestions: localStorage.getItem("interis.sug") !== "0",
 };
 const guideQuestions = () => (state.overview?.guide?.questions) || [];
+const pHref = (rest = "") => `#/p/${state.pid}${rest}`;
+const iHref = (id, turn) => pHref(`/i/${encodeURIComponent(id)}${turn === undefined || turn === null ? "" : `?t=${turn}`}`);
 const guideText = (code) => guideQuestions().find((q) => q.code === code)?.text || "";
 
 // ------------------------------------------------------------------ audio
@@ -189,40 +192,306 @@ async function refresh(msg) {
 
 async function route(keepScroll = false) {
   hideSelbar();
-  state.overview = await api("GET", "/api/overview");
-  renderNav();
+  stopPolling();
   const h = location.hash;
-  if (h.startsWith("#/i/")) {
-    const [id, query] = h.slice(4).split("?");
+  const m = h.match(/^#\/p\/(\d+)(.*)$/);
+  if (!m) {
+    player.detach();
+    state.pid = null; state.overview = null;
+    renderNav();
+    await renderProjects();
+    return;
+  }
+  state.pid = Number(m[1]);
+  state.overview = await api("GET", `/api/projects/${state.pid}`);
+  const rest = m[2];
+  renderNav(rest);
+  if (rest.startsWith("/i/")) {
+    const [id, query] = rest.slice(3).split("?");
     const turn = new URLSearchParams(query || "").get("t");
     await renderInterview(decodeURIComponent(id), turn === null ? null : Number(turn), keepScroll);
+  } else if (rest.startsWith("/setup")) {
+    player.detach();
+    renderSetup();
   } else {
     player.detach();
     await renderCompare();
   }
 }
 
-function renderNav() {
+function renderNav(rest = "") {
   const nav = $("#nav");
-  const current = location.hash.startsWith("#/i/") ? decodeURIComponent(location.hash.slice(4).split("?")[0]) : null;
+  if (state.pid === null) { nav.replaceChildren(); return; }
+  const current = rest.startsWith("/i/") ? decodeURIComponent(rest.slice(3).split("?")[0]) : null;
+  const done = state.overview.interviews.filter((iv) => iv.transcribed);
   nav.replaceChildren(
-    el("a", { href: "#/", class: current ? "" : "active" }, "Vergleich"),
-    ...state.overview.interviews.map((iv) =>
-      el("a", { href: `#/i/${encodeURIComponent(iv.id)}`, class: iv.id === current ? "active" : "" }, iv.id)),
+    el("span", { class: "pname" }, state.overview.project.name),
+    el("a", { href: pHref(), class: !current && !rest.startsWith("/setup") ? "active" : "" }, "Vergleich"),
+    el("a", { href: pHref("/setup"), class: rest.startsWith("/setup") ? "active" : "" }, "Leitfaden & Interviews"),
+    ...done.map((iv) => el("a", { href: iHref(iv.id), class: iv.id === current ? "active" : "" }, iv.id)),
   );
+}
+
+// ------------------------------------------------------------------ polling (job progress)
+let pollTimer = null;
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+function startPolling(fn, ms = 2000) { stopPolling(); pollTimer = setInterval(() => fn().catch(stopPolling), ms); }
+
+// ------------------------------------------------------------------ project list
+async function renderProjects() {
+  const projects = await api("GET", "/api/projects");
+  const name = el("input", { type: "text", placeholder: "z. B. Masterarbeit – Interviews Pflege", maxlength: 200, size: 40 });
+  const create = async () => {
+    if (!name.value.trim()) { name.focus(); return; }
+    const r = await api("POST", "/api/projects", { name: name.value.trim() });
+    location.hash = `#/p/${r.id}/setup`;
+  };
+  name.addEventListener("keydown", (e) => { if (e.key === "Enter") create(); });
+  const list = el("div", { class: "cards" }, projects.map((p) => el("a", { class: "card", href: p.transcribed && p.questions ? `#/p/${p.id}` : `#/p/${p.id}/setup` },
+    el("h3", {}, p.name),
+    el("div", { class: "time" },
+      `${p.questions} Leitfadenfragen · ${p.transcribed} von ${p.interviews} Interviews transkribiert`),
+    p.active_jobs ? el("div", { class: "running" }, `${p.active_jobs} Auftrag/Aufträge in Arbeit …`) : null)));
+  $("#main").replaceChildren(el("div", { class: "page" },
+    el("h2", {}, "Projekte"),
+    el("p", { class: "time" }, "Ein Projekt = ein Interviewleitfaden + die Interviews dazu. Alles bleibt auf diesem Rechner."),
+    projects.length ? list : el("p", { class: "empty" }, "Noch keine Projekte."),
+    el("div", { class: "box" }, el("h3", {}, "Neues Projekt"),
+      el("div", { class: "row" }, name, el("button", { class: "primary", onclick: create }, "Anlegen")))));
+  if (projects.some((p) => p.active_jobs)) startPolling(async () => { if (!state.pid) await renderProjects(); }, 5000);
+}
+
+// ------------------------------------------------------------------ setup: guide + interviews
+const GUIDE_TEMPLATE = `# Leitfaden
+
+## Einstieg
+- F1: Erzählen Sie mir bitte, wie Ihr Arbeitsalltag aussieht.
+  ~ Wie sieht ein typischer Tag bei Ihnen aus?
+  > Seit wann machen Sie das?
+
+## Hauptteil
+- F2: …
+`;
+
+const STAGES = ["hash", "decode", "transcribe", "align", "diarize", "analyze"];
+const STAGE_LABEL = { start: "Start, Modelle laden", hash: "Datei prüfen", decode: "Audio lesen",
+  transcribe: "Spracherkennung", align: "Wörter ausrichten", diarize: "Sprechertrennung", analyze: "Fragen erkennen" };
+
+function renderSetup() {
+  const ov = state.overview;
+  const main = $("#main");
+
+  // --- project settings
+  const pname = el("input", { type: "text", value: ov.project.name, maxlength: 200, size: 40 });
+  const hot = el("input", { type: "text", value: ov.project.hotwords, maxlength: 2000, size: 60,
+    placeholder: "z. B. Müller-Lüdenscheidt, SAP S/4HANA, Pflegedokumentation" });
+  const projectBox = el("div", { class: "box" }, el("h3", {}, "Projekt"),
+    el("label", { class: "field" }, "Name", pname),
+    el("label", { class: "field" }, "Glossar (Namen, Fachbegriffe – hilft bei der Schreibweise, gilt für neue Transkriptionen)", hot),
+    el("div", { class: "actions" }, el("button", { onclick: async () => {
+      await api("PATCH", `/api/projects/${state.pid}`, { name: pname.value.trim() || ov.project.name, hotwords: hot.value });
+      await refresh("Projekt gespeichert");
+    } }, "Speichern")));
+
+  // --- guide editor
+  const ta = el("textarea", { class: "guide-edit", rows: 22, spellcheck: "true" });
+  ta.value = ov.guide_text || GUIDE_TEMPLATE;
+  const preview = el("div", { class: "guide-preview" });
+  const gstatus = el("span", { class: "time" });
+  let timer = null, dirty = !ov.guide_text;
+  const updatePreview = async () => {
+    const r = await api("POST", "/api/guide/parse", { text: ta.value });
+    if (r.error) { preview.replaceChildren(el("p", { class: "warn" }, r.error)); return; }
+    let section = null;
+    const items = [];
+    for (const q of r.guide.questions) {
+      if (q.section && q.section !== section) { section = q.section; items.push(el("div", { class: "psec" }, section)); }
+      items.push(el("div", { class: "pq" }, el("span", { class: "code" }, q.code), q.text,
+        q.variants.length ? el("div", { class: "variants" }, "auch: ", q.variants.join(" · ")) : null,
+        q.probes.length ? el("div", { class: "variants" }, "Nachfragen: ", q.probes.join(" · ")) : null));
+    }
+    preview.replaceChildren(el("div", { class: "time" }, `${r.guide.questions.length} Fragen erkannt`), ...items);
+  };
+  ta.addEventListener("input", () => {
+    dirty = true; gstatus.textContent = "nicht gespeichert";
+    clearTimeout(timer); timer = setTimeout(updatePreview, 350);
+  });
+  if (dirty) gstatus.textContent = "Vorlage – bitte anpassen und speichern";
+
+  const fileIn = el("input", { type: "file", accept: ".md,.txt,.docx", hidden: true, onchange: async () => {
+    const f = fileIn.files[0]; fileIn.value = "";
+    if (!f) return;
+    if (f.name.toLowerCase().endsWith(".docx")) {
+      const res = await fetch("/api/guide/import-docx", { method: "POST", credentials: "same-origin",
+        headers: { "X-Interis": "1", "Content-Type": "application/octet-stream" }, body: f });
+      if (!res.ok) { setStatus(`Word-Datei: ${(await res.json()).detail}`, true); return; }
+      ta.value = (await res.json()).text;
+      setStatus("Word-Datei übernommen – bitte prüfen: nur Zeilen mit „- “ gelten als Fragen.");
+    } else {
+      ta.value = await f.text();
+    }
+    ta.dispatchEvent(new Event("input"));
+  } });
+  const linesToQuestions = () => {
+    ta.value = ta.value.split("\n").map((line) => {
+      const t = line.trim();
+      if (!t || /^(#|[-*~>]|\d+[.)]\s)/.test(t)) return line;
+      return `- ${t}`;
+    }).join("\n");
+    ta.dispatchEvent(new Event("input"));
+  };
+  const saveGuide = async () => {
+    const r = await api("PUT", `/api/projects/${state.pid}/guide`, { text: ta.value });
+    dirty = false; gstatus.textContent = "gespeichert";
+    await refresh(`Leitfaden gespeichert: ${r.questions} Fragen` +
+      (r.reanalyze ? ` – ${r.reanalyze} Interview(s) werden neu analysiert` : ""));
+  };
+  const guideBox = el("div", { class: "box" },
+    el("h3", {}, "Leitfaden (die Fragen, die du stellen wolltest)"),
+    el("details", { class: "time" }, el("summary", {}, "Format"),
+      el("pre", {}, "## Abschnitt\n- F1: Frage …            ← jede Frage beginnt mit „- “, Kürzel optional\n" +
+        "  ~ andere Formulierung  ← wenn du sie manchmal anders stellst\n  > geplante Nachfrage")),
+    el("div", { class: "row" },
+      el("button", { onclick: () => fileIn.click() }, "Datei laden (.docx, .md, .txt)"), fileIn,
+      el("button", { title: "Macht aus jeder einfachen Textzeile eine Frage", onclick: linesToQuestions }, "Jede Zeile als Frage"),
+      el("button", { class: "primary", onclick: saveGuide }, "Leitfaden speichern"), gstatus),
+    el("div", { class: "guide-split" }, ta, preview));
+  updatePreview();
+
+  // --- upload
+  const audioIn = el("input", { type: "file", accept: "audio/*,video/*,.m4a,.mp3,.wav,.aac,.flac,.ogg,.opus,.wma,.mp4,.mov,.mkv" });
+  const idIn = el("input", { type: "text", value: ov.next_id, maxlength: 40, size: 8, pattern: "[A-Za-z0-9_\\-]+" });
+  const model = el("select", {},
+    el("option", { value: "whisper-large-v3" }, "Genau (large-v3, empfohlen)"),
+    el("option", { value: "whisper-large-v3-turbo" }, "Schneller Entwurf (large-v3-turbo)"));
+  const bar = el("progress", { max: 100, value: 0, hidden: true });
+  const upBtn = el("button", { class: "primary" }, "Hochladen & transkribieren");
+  upBtn.addEventListener("click", () => {
+    const f = audioIn.files[0];
+    if (!f) { setStatus("Bitte zuerst eine Aufnahme auswählen.", true); return; }
+    const ext = (f.name.match(/\.([A-Za-z0-9]+)$/) || [])[1] || "";
+    const q = new URLSearchParams({ interview: idIn.value.trim(), ext, model: model.value });
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/api/projects/${state.pid}/interviews?${q}`);
+    xhr.setRequestHeader("X-Interis", "1");
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) bar.value = (100 * e.loaded) / e.total; };
+    xhr.onload = async () => {
+      bar.hidden = true; upBtn.disabled = false;
+      if (xhr.status !== 200) {
+        let msg = xhr.responseText;
+        try { msg = JSON.parse(msg).detail; } catch { /* plain text */ }
+        setStatus(`Upload fehlgeschlagen: ${msg}`, true); return;
+      }
+      await refresh(`${idIn.value} hochgeladen – Transkription eingereiht`);
+    };
+    xhr.onerror = () => { bar.hidden = true; upBtn.disabled = false; setStatus("Upload fehlgeschlagen", true); };
+    bar.hidden = false; bar.value = 0; upBtn.disabled = true;
+    setStatus("Lade hoch …");
+    xhr.send(f);
+  });
+  const uploadBox = el("div", { class: "box" },
+    el("h3", {}, "Interview hinzufügen"),
+    el("div", { class: "row" },
+      el("label", { class: "field" }, "Aufnahme", audioIn),
+      el("label", { class: "field" }, "Kürzel (Pseudonym)", idIn),
+      el("label", { class: "field" }, "Genauigkeit", model)),
+    el("div", { class: "row" }, upBtn, bar),
+    el("p", { class: "time" },
+      "Die Aufnahme wird als „", el("code", {}, `audio\\${ov.next_id}.<endung>`),
+      "“ in deinen Datenordner kopiert; der Dateiname wird nicht übernommen. " +
+      "Dauer: etwa 35–40 s pro Audiominute auf diesem PC (Laptop ca. doppelt so lange). " +
+      "Die Website darf offen bleiben oder geschlossen werden, nur „interis serve“ muss laufen."));
+
+  // --- interview list with job status
+  const listBox = el("div", { class: "box" });
+  const renderList = () => {
+    const ivs = state.overview.interviews;
+    const mismatch = ivs.some((iv) => iv.guide_mismatch);
+    listBox.replaceChildren(...[
+      el("h3", {}, "Interviews in diesem Projekt"),
+      mismatch ? el("p", { class: "warn" }, "Einige Interviews wurden mit einem älteren Leitfaden analysiert. ",
+        el("button", { onclick: async () => {
+          const r = await api("POST", `/api/projects/${state.pid}/reanalyze`);
+          await refresh(`${r.reanalyze} Interview(s) werden neu analysiert`);
+        } }, "Neu analysieren")) : null,
+      ivs.length ? el("table", { class: "jobs" },
+        el("tr", {}, el("th", {}, "Kürzel"), el("th", {}, "Dauer"), el("th", {}, "Status"), el("th", {}, "")),
+        ivs.map(interviewRow)) : el("p", { class: "time" }, "Noch keine Interviews."),
+    ].filter(Boolean));
+  };
+  renderList();
+
+  main.replaceChildren(el("div", { class: "page" }, projectBox, guideBox, uploadBox, listBox));
+
+  const active = () => state.overview.interviews.some((iv) => ["queued", "running"].includes(iv.job?.status));
+  if (active()) {
+    startPolling(async () => {
+      const before = state.overview.interviews.filter((iv) => iv.transcribed).length;
+      state.overview = await api("GET", `/api/projects/${state.pid}`);
+      renderList();
+      if (state.overview.interviews.filter((iv) => iv.transcribed).length !== before) renderNav("/setup");
+      if (!active()) stopPolling();
+    });
+  }
+}
+
+function interviewRow(iv) {
+  const j = iv.job;
+  let status, actions = [];
+  const busy = j && ["queued", "running"].includes(j.status);
+  if (busy && j.status === "queued") {
+    status = el("span", {}, j.kind === "analyze" ? "Analyse wartet" : "wartet", j.queue_pos ? ` (Position ${j.queue_pos + 1})` : "");
+  } else if (busy) {
+    const key = (j.stage || "start").split(":")[0];
+    const step = STAGES.indexOf(key);
+    status = j.kind === "analyze" ? el("span", { class: "running" }, "Fragen werden neu erkannt …")
+      : el("span", { class: "running" },
+        step >= 0 ? `Schritt ${step + 1}/${STAGES.length}: ` : "", STAGE_LABEL[key] || key,
+        j.progress > 0 && j.progress < 1 ? ` ${Math.round(j.progress * 100)} %` : " …",
+        el("progress", { max: 1, value: step >= 0 ? (step + j.progress) / STAGES.length : 0 }),
+        j.started_at ? el("span", { class: "time" }, ` seit ${new Date(j.started_at).toLocaleTimeString()}`) : null);
+  } else if (j && j.status === "failed") {
+    status = el("span", { class: "warn", title: j.message }, "Fehler: ", j.message.split("\n").pop());
+  } else if (j && j.status === "cancelled") {
+    status = el("span", { class: "time" }, "abgebrochen");
+  } else if (iv.transcribed) {
+    status = el("span", { class: "ok" }, "fertig", iv.guide_mismatch ? el("span", { class: "warn" }, " · älterer Leitfaden") : null,
+      iv.has_roles ? null : el("span", { class: "time" }, " · Rollen unklar"));
+  } else {
+    status = el("span", { class: "time" }, "keine Transkription");
+  }
+  if (busy) actions.push(el("button", { onclick: async () => {
+    if (!confirm(`${iv.id}: Auftrag abbrechen? Bereits fertige Schritte bleiben zwischengespeichert.`)) return;
+    await api("POST", `/api/jobs/${j.id}/cancel`); await refresh("Abgebrochen");
+  } }, "Abbrechen"));
+  if (j && ["failed", "cancelled"].includes(j.status)) actions.push(el("button", { onclick: async () => {
+    await api("POST", `/api/jobs/${j.id}/retry`); await refresh("Neu eingereiht");
+  } }, "Erneut starten"));
+  if (iv.transcribed) actions.push(el("a", { href: iHref(iv.id) }, "Transkript öffnen"));
+  if (!busy) actions.push(el("button", { class: "icon", title: "Interview aus Interis entfernen", onclick: async () => {
+    if (!confirm(`${iv.id} entfernen?
+
+Gelöscht werden: Transkript, Zwischenergebnisse, deine Markierungen ` +
+      "und die hochgeladene Kopie der Aufnahme. Deine Originaldatei bleibt, wo sie ist.")) return;
+    await api("DELETE", `/api/interviews/${encodeURIComponent(iv.id)}`); await refresh(`${iv.id} entfernt`);
+  } }, "🗑"));
+  return el("tr", {}, el("td", {}, el("strong", {}, iv.id)), el("td", {}, iv.duration_s ? fmt(iv.duration_s) : "–"),
+    el("td", {}, status), el("td", { class: "acts" }, actions));
 }
 
 // ------------------------------------------------------------------ comparison view
 async function renderCompare() {
-  const data = await api("GET", "/api/compare");
+  const data = await api("GET", `/api/projects/${state.pid}/compare`);
   const main = $("#main");
   if (!data.guide) {
     main.replaceChildren(el("p", { class: "empty" },
-      "Kein Leitfaden gefunden. Lege leitfaden.md in den Datenordner oder starte mit --guide."));
+      "Noch kein Leitfaden. ", el("a", { href: pHref("/setup") }, "Leitfaden eingeben →")));
     return;
   }
   if (!data.interviews.length) {
-    main.replaceChildren(el("p", { class: "empty" }, "Noch keine Interviews. Erst mit `interis transcribe` transkribieren."));
+    main.replaceChildren(el("p", { class: "empty" },
+      "Noch keine fertigen Interviews. ", el("a", { href: pHref("/setup") }, "Aufnahme hochladen →")));
     return;
   }
   const ids = data.interviews.filter((id) => !state.hidden.has(id));
@@ -244,10 +513,11 @@ async function renderCompare() {
   for (const id of ids) {
     const iv = state.overview.interviews.find((i) => i.id === id);
     grid.append(el("div", { class: "hcell" },
-      el("a", { href: `#/i/${encodeURIComponent(id)}` }, id),
+      el("a", { href: iHref(id) }, id),
       el("div", { class: "meta" }, fmt(iv.duration_s), iv.has_audio ? "" : " · kein Audio",
         iv.has_roles ? "" : " · Rollen unbekannt"),
-      iv.guide_mismatch ? el("div", { class: "meta warn" }, "mit anderem Leitfaden analysiert – `interis analyze` ausführen") : null));
+      iv.guide_mismatch ? el("div", { class: "meta warn" }, "mit älterem Leitfaden analysiert – ",
+        el("a", { href: pHref("/setup") }, "neu analysieren")) : null));
   }
 
   let section = null;
@@ -321,7 +591,7 @@ function dialogueTurn(id, code, t) {
       onclick: () => linkDialog(id, { turn: t.turn, first: 0, last: t.n_words - 1,
         text: t.pieces.map((p) => p.text).join(" ") }, { excludeCode: code }) }, "↗"));
   }
-  node.append(el("a", { class: "icon time", href: `#/i/${encodeURIComponent(id)}?t=${t.turn}`, title: "im Transkript öffnen" }, " ⤴"));
+  node.append(el("a", { class: "icon time", href: iHref(id, t.turn), title: "im Transkript öffnen" }, " ⤴"));
   return node;
 }
 
@@ -338,7 +608,7 @@ function linkItem(id, lk) {
       el("button", { class: "icon", title: "Verknüpfung löschen", onclick: async () => {
         await api("DELETE", `/api/links/${lk.id}`); await refresh("Verknüpfung gelöscht");
       } }, "✕"),
-      el("a", { class: "icon time", href: `#/i/${encodeURIComponent(id)}?t=${lk.turn}`, title: "im Transkript öffnen" }, "⤴")),
+      el("a", { class: "icon time", href: iHref(id, lk.turn), title: "im Transkript öffnen" }, "⤴")),
     el("div", { class: "txt" }, lk.text),
     lk.note ? el("div", { class: "time" }, "Notiz: ", lk.note) : null);
 }
@@ -357,7 +627,7 @@ function suggestionItem(id, code, s) {
       s.from_code ? el("span", { class: "time" }, `(aus der Antwort auf ${s.from_code})`) : null,
       el("button", { title: "übernehmen", onclick: decide("confirmed") }, "✓"),
       el("button", { title: "verwerfen", onclick: decide("rejected") }, "✕"),
-      el("a", { class: "icon time", href: `#/i/${encodeURIComponent(id)}?t=${s.turn}`, title: "im Transkript öffnen" }, "⤴")),
+      el("a", { class: "icon time", href: iHref(id, s.turn), title: "im Transkript öffnen" }, "⤴")),
     el("div", { class: "txt" }, s.text));
 }
 
@@ -422,7 +692,7 @@ async function renderInterview(id, focusTurn, keepScroll) {
     const target = first ? first.question.turn : c.links[0]?.turn;
     cov.append(el("span", { class: "c", title: gq.text }, gq.code),
       el("span", { class: `s ${statusCls}` },
-        target !== undefined ? el("a", { href: `#/i/${encodeURIComponent(id)}?t=${target}` }, STATUS_LABEL[c.status], first ? ` ${fmt(first.start)}` : "")
+        target !== undefined ? el("a", { href: iHref(id, target) }, STATUS_LABEL[c.status], first ? ` ${fmt(first.start)}` : "")
           : STATUS_LABEL[c.status]));
   }
   side.append(cov,
@@ -433,8 +703,8 @@ async function renderInterview(id, focusTurn, keepScroll) {
       el("p", {}, el("span", { class: "tag" }, "F1"), "Frage  ", el("span", { class: "tag link" }, "↗F3"), "beantwortet auch F3  ",
         el("span", { class: "w low" }, "unsicher"))));
 
-  const header = el("div", { class: "toolbar" }, el("a", { href: "#/" }, "← Vergleich"), el("strong", {}, `Interview ${id}`),
-    iv?.has_audio ? null : el("span", { class: "warn" }, "Keine Audiodatei hinterlegt (interis set-audio)."));
+  const header = el("div", { class: "toolbar" }, el("a", { href: pHref() }, "← Vergleich"), el("strong", {}, `Interview ${id}`),
+    iv?.has_audio ? null : el("span", { class: "warn" }, "Keine Audiodatei hinterlegt."));
   const scrollY = window.scrollY;
   $("#main").replaceChildren(header, ...parts, el("div", { class: "iview" }, tr, side));
 

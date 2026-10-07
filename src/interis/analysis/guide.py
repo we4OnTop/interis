@@ -42,6 +42,18 @@ class Guide:
     def to_dict(self) -> dict:
         return {"title": self.title, "questions": [q.__dict__ for q in self.questions]}
 
+    def to_markdown(self) -> str:
+        lines = [f"# {self.title}", ""] if self.title else []
+        section = None
+        for q in self.questions:
+            if q.section and q.section != section:
+                section = q.section
+                lines += ["", f"## {section}"]
+            lines.append(f"- {q.code}: {q.text}")
+            lines += [f"  ~ {v}" for v in q.variants]
+            lines += [f"  > {p}" for p in q.probes]
+        return "\n".join(lines).strip() + "\n"
+
 
 class GuideError(ValueError):
     pass
@@ -96,3 +108,44 @@ def parse_guide(text: str) -> Guide:
 def load_guide(path: Path) -> Guide:
     # utf-8-sig: Windows editors (Notepad, PowerShell) often write a BOM
     return parse_guide(Path(path).read_text(encoding="utf-8-sig"))
+
+
+def docx_to_guide_text(data: bytes) -> str:
+    """Turn a Word interview guide into the Markdown format above, as a starting point
+    for editing: headings become sections, paragraphs and table cells ending with "?" or
+    formatted as list items become questions, everything else is kept as plain text
+    (which the parser ignores)."""
+    import io
+
+    from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    doc = Document(io.BytesIO(data))
+    lines: list[str] = []
+    seen: set[str] = set()
+
+    def add(p: Paragraph) -> None:
+        text = " ".join(p.text.split())
+        if not text:
+            return
+        style = (p.style.name if p.style is not None else "").lower()
+        if style.startswith(("heading", "überschrift", "title", "titel")):
+            lines.extend(["", f"## {text}"])
+        elif text.endswith("?") or "list" in style or "liste" in style:
+            if text not in seen:  # merged table cells repeat their text
+                seen.add(text)
+                lines.append(f"- {text.lstrip('-•*– ').strip()}")
+        else:
+            lines.append(text)
+
+    for child in doc.element.body.iterchildren():
+        tag = child.tag.rsplit("}", 1)[-1]
+        if tag == "p":
+            add(Paragraph(child, doc))
+        elif tag == "tbl":
+            for row in Table(child, doc).rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        add(p)
+    return "\n".join(lines).strip() + "\n"

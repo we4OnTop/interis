@@ -7,25 +7,39 @@ Security (see ARCHITECTURE.md §6):
 * state-changing requests need a same-origin ``Origin`` and a custom header, which a
   foreign website cannot send without a CORS preflight (and there is no CORS);
 * strict Content-Security-Policy, no third-party resources, no API docs endpoints;
-* interview text is rendered with ``textContent`` only in the frontend.
+* interview text is rendered with ``textContent`` only in the frontend;
+* uploads: size limit, extension allow-list, stored under the interview ID only (the
+  original file name never reaches the server).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import secrets
+import shutil
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from interis.analysis.guide import Guide, GuideQuestion, load_guide
+from interis.analysis.guide import (
+    Guide,
+    GuideError,
+    GuideQuestion,
+    docx_to_guide_text,
+    load_guide,
+    parse_guide,
+)
 from interis.config import Paths
+from interis.models import ASR_MODELS, sha256_file
 from interis.pipeline.types import Transcript
+from interis.web.jobs import JobRunner, guide_path_for
 from interis.web.review import guide_mismatch, interview_state, interviewer_of
 from interis.web.store import Store
 
@@ -35,6 +49,13 @@ CSRF_HEADER = "x-interis"
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; "
        "frame-ancestors 'none'; form-action 'none'")
+INTERVIEW_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
+AUDIO_EXT = {"m4a", "mp3", "wav", "aac", "flac", "ogg", "opus", "wma", "webm", "mp4", "mov",
+             "mkv", "avi", "3gp", "amr"}
+MAX_AUDIO_BYTES = 8 * 1024**3
+MAX_DOCX_BYTES = 20 * 1024**2
+MAX_GUIDE_CHARS = 200_000
+LEGACY_PROJECT = "Bestehende Interviews"
 
 
 class Login(BaseModel):
@@ -73,22 +94,38 @@ class LinkUpdate(BaseModel):
     note: str | None = Field(default=None, max_length=2000)
 
 
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    hotwords: str = Field(default="", max_length=2000)
+
+
+class ProjectUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    hotwords: str | None = Field(default=None, max_length=2000)
+
+
+class GuideText(BaseModel):
+    text: str = Field(max_length=MAX_GUIDE_CHARS)
+
+
 def _guide_from_dict(d: dict[str, Any]) -> Guide:
     return Guide(d.get("title"), [GuideQuestion(**q) for q in d["questions"]])
 
 
 class _Data:
-    """Transcripts are re-read only when their file changes."""
+    """Transcripts and guides are re-read only when their file changes."""
 
-    def __init__(self, paths: Paths, guide_path: Path | None) -> None:
+    def __init__(self, paths: Paths, store: Store, legacy_guide: Path | None) -> None:
         self.paths = paths
-        self.guide_path = guide_path
+        self.store = store
+        self.legacy_guide = legacy_guide
         self._cache: dict[Path, tuple[float, Transcript]] = {}
+        self._guides: dict[Path, tuple[float, Guide | None, str | None]] = {}
 
-    def transcripts(self) -> dict[str, Transcript]:
+    def transcripts(self, ids: list[str] | None = None) -> dict[str, Transcript]:
         out = {}
         for path in sorted(self.paths.exports.glob("*/*.json")):
-            if path.stem != path.parent.name:
+            if path.stem != path.parent.name or (ids is not None and path.stem not in ids):
                 continue
             mtime = path.stat().st_mtime
             cached = self._cache.get(path)
@@ -98,26 +135,83 @@ class _Data:
             out[cached[1].meta["interview_id"]] = cached[1]
         return out
 
-    def guide(self, transcripts: dict[str, Transcript]) -> Guide | None:
-        if self.guide_path and self.guide_path.exists():
-            return load_guide(self.guide_path)
-        default = self.paths.root / "leitfaden.md"
-        if default.exists():
-            return load_guide(default)
-        for t in transcripts.values():
+    def guide_file(self, project_id: int) -> Path:
+        return guide_path_for(self.paths, project_id)
+
+    def guide(self, project_id: int | None) -> tuple[Guide | None, str | None]:
+        """(guide, error message) of a project."""
+        if project_id is None:
+            return None, None
+        path = self.guide_file(project_id)
+        if not path.is_file():
+            return None, None
+        mtime = path.stat().st_mtime
+        cached = self._guides.get(path)
+        if cached is None or cached[0] != mtime:
+            try:
+                cached = (mtime, load_guide(path), None)
+            except GuideError as e:
+                cached = (mtime, None, str(e))
+            self._guides[path] = cached
+        return cached[1], cached[2]
+
+    def adopt_unassigned(self) -> None:
+        """Interviews transcribed on the command line (or before projects existed) are
+        put into the project "Bestehende Interviews", with the guide used so far."""
+        loose = [iid for iid in self.transcripts() if self.store.project_of(iid) is None]
+        if not loose:
+            return
+        project = next((p for p in self.store.projects() if p["name"] == LEGACY_PROJECT), None)
+        if project is None:
+            pid = self.store.create_project(LEGACY_PROJECT)
+            guide = self._legacy_guide(loose)
+            if guide is not None:
+                target = self.guide_file(pid)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(guide, encoding="utf-8")
+        else:
+            pid = project["id"]
+        self.store.assign_project(loose, pid)
+
+    def _legacy_guide(self, ids: list[str]) -> str | None:
+        for path in (self.legacy_guide, self.paths.root / "leitfaden.md"):
+            if path and path.is_file():
+                return path.read_text(encoding="utf-8-sig")
+        for t in self.transcripts(ids).values():
             if t.analysis.get("guide"):
-                return _guide_from_dict(t.analysis["guide"])
+                return _guide_from_dict(t.analysis["guide"]).to_markdown()
         return None
 
 
 def create_app(paths: Paths, login_token: str, port: int,
                guide_path: Path | None = None) -> FastAPI:
+    """``guide_path``: guide for interviews from before projects existed."""
     store = Store(paths.root / "interis.db")
-    data = _Data(paths, guide_path)
+    data = _Data(paths, store, guide_path)
+    data.adopt_unassigned()
+
+    def job_guide(iid: str) -> Path | None:
+        pid = store.project_of(iid)
+        path = data.guide_file(pid) if pid is not None else None
+        return path if path and path.is_file() else None
+
+    def job_hotwords(iid: str) -> str:
+        pid = store.project_of(iid)
+        project = store.project(pid) if pid is not None else None
+        return project["hotwords"].strip() if project else ""
+
+    runner = JobRunner(paths, store, job_guide, job_hotwords)
     session_value = secrets.token_urlsafe(32)
     allowed_origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
 
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        runner.start()
+        yield
+        runner.stop()
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app.state.runner = runner
 
     @app.middleware("http")
     async def security(request: Request, call_next):
@@ -148,10 +242,36 @@ def create_app(paths: Paths, login_token: str, port: int,
 
     # ------------------------------------------------------------------ helpers
     def _transcript(interview: str) -> Transcript:
-        t = data.transcripts().get(interview)
+        t = data.transcripts([interview]).get(interview)
         if t is None:
             raise HTTPException(404, "unknown interview")
         return t
+
+    def _guide_of(interview: str) -> Guide | None:
+        return data.guide(store.project_of(interview))[0]
+
+    def _project(pid: int) -> dict[str, Any]:
+        project = store.project(pid)
+        if project is None:
+            raise HTTPException(404, "unknown project")
+        return project
+
+    def _active_jobs(ids: list[str] | None = None) -> list[dict[str, Any]]:
+        return [j for j in store.jobs(ids) if j["status"] in ("queued", "running")]
+
+    def _queue_analysis(ids: list[str]) -> int:
+        """Re-run the question analysis (not the transcription) after a guide change."""
+        pending = {(j["kind"], j["interview_id"]) for j in _active_jobs(ids)}
+        n = 0
+        for iid in ids:
+            if not (paths.exports / iid / f"{iid}.json").is_file():
+                continue
+            if ("analyze", iid) in pending or ("transcribe", iid) in pending:
+                continue
+            store.add_job("analyze", iid)
+            n += 1
+        runner.notify()
+        return n
 
     def _check_span(t: Transcript, s: Span | QuestionDelete, last: int | None = None) -> None:
         if s.turn >= len(t.turns):
@@ -179,25 +299,165 @@ def create_app(paths: Paths, login_token: str, port: int,
                             path="/")
         return response
 
-    @app.get("/api/overview")
-    def overview() -> dict[str, Any]:
-        transcripts = data.transcripts()
-        guide = data.guide(transcripts)
-        return {
-            "guide": guide.to_dict() if guide else None,
-            "interviews": [{
+    # ---------------------------------------------------------------- projects
+    @app.get("/api/projects")
+    def projects() -> list[dict[str, Any]]:
+        data.adopt_unassigned()
+        out = []
+        for p in store.projects():
+            ids = store.project_interviews(p["id"])
+            guide, _ = data.guide(p["id"])
+            out.append({**p, "interviews": len(ids),
+                        "transcribed": len(data.transcripts(ids)),
+                        "questions": len(guide.questions) if guide else 0,
+                        "active_jobs": len(_active_jobs(ids))})
+        return out
+
+    @app.post("/api/projects")
+    def create_project(body: ProjectCreate) -> dict[str, int]:
+        return {"id": store.create_project(body.name.strip(), body.hotwords.strip())}
+
+    @app.patch("/api/projects/{pid}")
+    def update_project(pid: int, body: ProjectUpdate) -> dict[str, bool]:
+        _project(pid)
+        store.update_project(pid, body.name.strip() if body.name else None,
+                             body.hotwords.strip() if body.hotwords is not None else None)
+        return {"ok": True}
+
+    @app.get("/api/projects/{pid}")
+    def project(pid: int) -> dict[str, Any]:
+        p = _project(pid)
+        ids = store.project_interviews(pid)
+        transcripts = data.transcripts(ids)
+        guide, guide_error = data.guide(pid)
+        guide_file = data.guide_file(pid)
+        all_jobs = store.jobs()
+        queue = [j["id"] for j in all_jobs if j["status"] in ("queued", "running")]
+        latest: dict[str, dict[str, Any]] = {}
+        for j in all_jobs:
+            if j["interview_id"] in ids:
+                pos = queue.index(j["id"]) if j["id"] in queue else None
+                latest[j["interview_id"]] = {**j, "queue_pos": pos}
+        interviews = []
+        for iid in ids:
+            t = transcripts.get(iid)
+            audio = store.audio_path(iid)
+            interviews.append({
                 "id": iid,
-                "duration_s": t.meta["audio"]["duration_s"],
-                "has_audio": bool((p := store.audio_path(iid)) and p.exists()),
-                "has_roles": interviewer_of(t) is not None,
-                "guide_mismatch": guide_mismatch(t, guide),
-            } for iid, t in transcripts.items()],
+                "transcribed": t is not None,
+                "duration_s": t.meta["audio"]["duration_s"] if t else None,
+                "has_audio": bool(audio and audio.exists()),
+                "has_roles": bool(t and interviewer_of(t) is not None),
+                "guide_mismatch": bool(t and guide_mismatch(t, guide)),
+                "job": latest.get(iid),
+            })
+        taken = store.interview_ids() | {d.name for d in paths.exports.iterdir() if d.is_dir()}
+        n = 1
+        while f"I{n:02d}" in taken:
+            n += 1
+        return {
+            "project": p,
+            "guide": guide.to_dict() if guide else None,
+            "guide_text": guide_file.read_text(encoding="utf-8-sig")
+            if guide_file.is_file() else "",
+            "guide_error": guide_error,
+            "interviews": interviews,
+            "next_id": f"I{n:02d}",
+            "models": list(ASR_MODELS),
         }
 
-    @app.get("/api/compare")
-    def compare() -> dict[str, Any]:
-        transcripts = data.transcripts()
-        guide = data.guide(transcripts)
+    @app.put("/api/projects/{pid}/guide")
+    def save_guide(pid: int, body: GuideText) -> dict[str, int]:
+        _project(pid)
+        try:
+            guide = parse_guide(body.text)
+        except GuideError as e:
+            raise HTTPException(422, f"Leitfaden: {e}") from e
+        target = data.guide_file(pid)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body.text, encoding="utf-8")
+        queued = _queue_analysis(store.project_interviews(pid))
+        return {"questions": len(guide.questions), "reanalyze": queued}
+
+    @app.post("/api/projects/{pid}/reanalyze")
+    def reanalyze(pid: int) -> dict[str, int]:
+        _project(pid)
+        return {"reanalyze": _queue_analysis(store.project_interviews(pid))}
+
+    @app.post("/api/guide/parse")
+    def parse_guide_text(body: GuideText) -> dict[str, Any]:
+        try:
+            return {"guide": parse_guide(body.text).to_dict(), "error": None}
+        except GuideError as e:
+            return {"guide": None, "error": str(e)}
+
+    @app.post("/api/guide/import-docx")
+    async def import_docx(request: Request) -> dict[str, str]:
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > MAX_DOCX_BYTES:
+                raise HTTPException(413, "Datei zu groß")
+        try:
+            return {"text": docx_to_guide_text(bytes(body))}
+        except Exception as e:  # noqa: BLE001 – any malformed file
+            raise HTTPException(422, "Keine lesbare Word-Datei (.docx)") from e
+
+    @app.post("/api/projects/{pid}/interviews")
+    async def upload_interview(pid: int, request: Request,
+                               interview: str = Query(max_length=40),
+                               ext: str = Query(max_length=8),
+                               model: str = Query("whisper-large-v3")) -> dict[str, Any]:
+        """The recording is streamed into the data directory as ``audio/<ID>.<ext>``."""
+        _project(pid)
+        ext = ext.lower().lstrip(".")
+        if not INTERVIEW_ID.match(interview):
+            raise HTTPException(422, "Kürzel: nur Buchstaben, Ziffern, - und _ (max. 40)")
+        if ext not in AUDIO_EXT:
+            raise HTTPException(422, f"Dateityp .{ext} wird nicht unterstützt")
+        if model not in ASR_MODELS:
+            raise HTTPException(422, "unknown model")
+        if interview in store.interview_ids() or (paths.exports / interview).exists():
+            raise HTTPException(409, f"Das Kürzel {interview} ist schon vergeben")
+        paths.audio.mkdir(parents=True, exist_ok=True)
+        target = paths.audio / f"{interview}.{ext}"
+        part = target.with_name(target.name + ".part")
+        size = 0
+        try:
+            with part.open("wb") as f:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > MAX_AUDIO_BYTES:
+                        raise HTTPException(413, "Datei zu groß (max. 8 GB)")
+                    f.write(chunk)
+            if size == 0:
+                raise HTTPException(422, "leere Datei")
+            part.replace(target)
+        finally:
+            part.unlink(missing_ok=True)
+        store.add_interview(interview, pid, target)
+        job_id = store.add_job("transcribe", interview, {"model": model})
+        runner.notify()
+        return {"id": interview, "job": job_id}
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: int) -> dict[str, bool]:
+        return {"ok": runner.cancel(job_id)}
+
+    @app.post("/api/jobs/{job_id}/retry")
+    def retry_job(job_id: int) -> dict[str, int]:
+        job = store.job(job_id)
+        if job is None or job["status"] not in ("failed", "cancelled"):
+            raise HTTPException(409, "job is not failed or cancelled")
+        new_id = store.add_job(job["kind"], job["interview_id"], job["options"])
+        runner.notify()
+        return {"job": new_id}
+
+    @app.get("/api/projects/{pid}/compare")
+    def compare(pid: int) -> dict[str, Any]:
+        _project(pid)
+        transcripts = data.transcripts(store.project_interviews(pid))
+        guide, _ = data.guide(pid)
         states = {iid: interview_state(t, store.question_marks(iid), store.links(iid), guide)
                   for iid, t in transcripts.items()}
         return {
@@ -207,14 +467,16 @@ def create_app(paths: Paths, login_token: str, port: int,
             "unassigned": {iid: s["unassigned"] for iid, s in states.items()},
         }
 
+    # ---------------------------------------------------------------- interviews
     @app.get("/api/interviews/{interview}")
     def interview(interview: str) -> dict[str, Any]:
         t = _transcript(interview)
-        guide = data.guide(data.transcripts())
+        guide = _guide_of(interview)
         state = interview_state(t, store.question_marks(interview), store.links(interview),
                                 guide)
         return {
             "id": interview,
+            "project": store.project_of(interview),
             "speakers": t.speakers,
             "turns": [{"speaker": tu.speaker, "start": tu.start, "end": tu.end,
                        "words": [{"t": w.text, "s": w.start, "e": w.end, "p": round(w.prob, 2)}
@@ -231,11 +493,41 @@ def create_app(paths: Paths, login_token: str, port: int,
             raise HTTPException(404, "no audio registered")
         return FileResponse(path)
 
+    @app.delete("/api/interviews/{interview}")
+    def delete_interview(interview: str) -> dict[str, bool]:
+        """Removes the interview from Interis: transcript files, cached intermediate
+        results, review decisions and the *uploaded copy* of the recording. A recording
+        registered from elsewhere on the command line is left untouched."""
+        if not INTERVIEW_ID.match(interview) or (
+                store.project_of(interview) is None and interview not in data.transcripts()):
+            raise HTTPException(404, "unknown interview")
+        if any(j["status"] in ("queued", "running") for j in store.jobs([interview])):
+            raise HTTPException(409, "Erst den laufenden Auftrag abbrechen")
+        exports = paths.exports / interview
+        audio = store.audio_path(interview)
+        uploaded = audio is not None and audio.parent == paths.audio and audio.is_file()
+        sha = None
+        transcript = exports / f"{interview}.json"
+        if transcript.is_file():
+            sha = json.loads(transcript.read_text(encoding="utf-8"))["meta"]["audio"]["sha256"]
+        elif uploaded:
+            sha = sha256_file(audio)
+        if sha:
+            cache = paths.cache / sha[:16]
+            if cache.parent == paths.cache and cache.is_dir():
+                shutil.rmtree(cache)
+        if exports.is_dir() and exports.parent == paths.exports:
+            shutil.rmtree(exports)
+        if uploaded:
+            audio.unlink()
+        store.delete_interview(interview)
+        return {"ok": True}
+
     @app.post("/api/questions")
     def set_question(body: QuestionUpdate) -> dict[str, bool]:
         t = _transcript(body.interview)
         _check_span(t, body, body.last)
-        _check_code(body.guide_code, data.guide(data.transcripts()))
+        _check_code(body.guide_code, _guide_of(body.interview))
         auto = {(q["turn"], q["first"]) for q in t.analysis.get("questions", [])}
         source = "auto" if (body.turn, body.first) in auto else "manual"
         store.set_question(body.interview, body.turn, body.first, body.last, body.guide_code,
@@ -252,7 +544,7 @@ def create_app(paths: Paths, login_token: str, port: int,
     def create_link(body: LinkCreate) -> dict[str, int]:
         t = _transcript(body.interview)
         _check_span(t, body, body.last)
-        _check_code(body.guide_code, data.guide(data.transcripts()))
+        _check_code(body.guide_code, _guide_of(body.interview))
         link_id = store.set_link(body.interview, body.guide_code, body.turn, body.first,
                                  body.last, body.status, body.source, body.omitted, body.note)
         return {"id": link_id}

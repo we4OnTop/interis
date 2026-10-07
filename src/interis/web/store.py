@@ -7,6 +7,7 @@ when the analysis is re-run on the same transcript.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -15,10 +16,32 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA = """
+-- A project = one interview guide + the interviews conducted with it.
+CREATE TABLE IF NOT EXISTS projects (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    hotwords    TEXT NOT NULL DEFAULT '',  -- names/terms that help the spelling
+    created_at  TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS interviews (
     id          TEXT PRIMARY KEY,
     audio_path  TEXT,
     added_at    TEXT NOT NULL
+);
+-- Transcriptions / re-analyses started from the website, run one at a time.
+CREATE TABLE IF NOT EXISTS jobs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT NOT NULL CHECK (kind IN ('transcribe', 'analyze')),
+    interview_id TEXT NOT NULL,
+    options      TEXT NOT NULL DEFAULT '{}',
+    status       TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed',
+                                                 'cancelled')),
+    stage        TEXT NOT NULL DEFAULT '',
+    progress     REAL NOT NULL DEFAULT 0,
+    message      TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    started_at   TEXT,
+    finished_at  TEXT
 );
 -- Corrections of detected questions, and questions you mark yourself.
 CREATE TABLE IF NOT EXISTS question_marks (
@@ -60,6 +83,10 @@ class Store:
         self.path = path
         with self._conn() as c:
             c.executescript(SCHEMA)
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(interviews)")}
+            if "project_id" not in cols:  # databases from before projects existed
+                c.execute("ALTER TABLE interviews ADD COLUMN project_id INTEGER "
+                          "REFERENCES projects(id)")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -79,6 +106,35 @@ class Store:
                 "ON CONFLICT(id) DO UPDATE SET audio_path = excluded.audio_path",
                 (interview_id, str(audio_path) if audio_path else None, _now()),
             )
+
+    def add_interview(self, interview_id: str, project_id: int, audio_path: Path) -> None:
+        with self._conn() as c:
+            c.execute("INSERT INTO interviews (id, audio_path, added_at, project_id) "
+                      "VALUES (?, ?, ?, ?)", (interview_id, str(audio_path), _now(), project_id))
+
+    def interview_ids(self) -> set[str]:
+        with self._conn() as c:
+            return {r["id"] for r in c.execute("SELECT id FROM interviews")}
+
+    def project_of(self, interview_id: str) -> int | None:
+        with self._conn() as c:
+            row = c.execute("SELECT project_id FROM interviews WHERE id = ?",
+                            (interview_id,)).fetchone()
+        return row["project_id"] if row else None
+
+    def project_interviews(self, project_id: int) -> list[str]:
+        with self._conn() as c:
+            rows = c.execute("SELECT id FROM interviews WHERE project_id = ? ORDER BY id",
+                             (project_id,)).fetchall()
+        return [r["id"] for r in rows]
+
+    def assign_project(self, interview_ids: list[str], project_id: int) -> None:
+        with self._conn() as c:
+            for iid in interview_ids:
+                c.execute(
+                    "INSERT INTO interviews (id, added_at, project_id) VALUES (?, ?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id",
+                    (iid, _now(), project_id))
 
     def audio_path(self, interview_id: str) -> Path | None:
         with self._conn() as c:
@@ -149,3 +205,86 @@ class Store:
     def delete_link(self, link_id: int) -> None:
         with self._conn() as c:
             c.execute("DELETE FROM answer_links WHERE id = ?", (link_id,))
+
+    # ---------------------------------------------------------------- projects
+    def create_project(self, name: str, hotwords: str = "") -> int:
+        with self._conn() as c:
+            cur = c.execute("INSERT INTO projects (name, hotwords, created_at) VALUES (?, ?, ?)",
+                            (name, hotwords, _now()))
+        return int(cur.lastrowid)
+
+    def projects(self) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM projects ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+    def project(self, project_id: int) -> dict[str, Any] | None:
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_project(self, project_id: int, name: str | None, hotwords: str | None) -> None:
+        with self._conn() as c:
+            if name is not None:
+                c.execute("UPDATE projects SET name = ? WHERE id = ?", (name, project_id))
+            if hotwords is not None:
+                c.execute("UPDATE projects SET hotwords = ? WHERE id = ?",
+                          (hotwords, project_id))
+
+    # ---------------------------------------------------------------- jobs
+    def add_job(self, kind: str, interview_id: str, options: dict[str, Any] | None = None,
+                ) -> int:
+        with self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO jobs (kind, interview_id, options, status, created_at) "
+                "VALUES (?, ?, ?, 'queued', ?)",
+                (kind, interview_id, json.dumps(options or {}), _now()))
+        return int(cur.lastrowid)
+
+    def jobs(self, interview_ids: list[str] | None = None) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM jobs ORDER BY id").fetchall()
+        out = [{**dict(r), "options": json.loads(r["options"])} for r in rows]
+        if interview_ids is not None:
+            wanted = set(interview_ids)
+            out = [j for j in out if j["interview_id"] in wanted]
+        return out
+
+    def job(self, job_id: int) -> dict[str, Any] | None:
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return {**dict(row), "options": json.loads(row["options"])} if row else None
+
+    def next_queued_job(self) -> dict[str, Any] | None:
+        with self._conn() as c:
+            row = c.execute("SELECT id FROM jobs WHERE status = 'queued' ORDER BY id "
+                            "LIMIT 1").fetchone()
+        return self.job(row["id"]) if row else None
+
+    def update_job(self, job_id: int, **fields: Any) -> None:
+        allowed = {"status", "stage", "progress", "message", "started_at", "finished_at"}
+        assert set(fields) <= allowed, fields
+        if fields.get("status") == "running":
+            fields.setdefault("started_at", _now())
+        if fields.get("status") in ("done", "failed", "cancelled"):
+            fields.setdefault("finished_at", _now())
+        cols = ", ".join(f"{k} = ?" for k in fields)  # keys checked against the allow-list
+        with self._conn() as c:
+            c.execute(f"UPDATE jobs SET {cols} WHERE id = ?",  # noqa: S608
+                      (*fields.values(), job_id))
+
+    def requeue_interrupted_jobs(self) -> None:
+        """Jobs that were running when the server stopped continue (their finished steps
+        are cached, so little work is repeated)."""
+        with self._conn() as c:
+            c.execute("UPDATE jobs SET status = 'queued', stage = '', progress = 0 "
+                      "WHERE status = 'running'")
+
+    def delete_interview(self, interview_id: str) -> None:
+        """Remove all review decisions and jobs of an interview (files: see the caller)."""
+        with self._conn() as c:
+            for table, col in (("question_marks", "interview_id"),
+                               ("answer_links", "interview_id"), ("jobs", "interview_id"),
+                               ("interviews", "id")):
+                c.execute(f"DELETE FROM {table} WHERE {col} = ?",  # noqa: S608 – constants
+                          (interview_id,))
