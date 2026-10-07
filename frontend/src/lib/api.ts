@@ -3,13 +3,16 @@
 
 export type Role = "interviewer" | "interviewee" | "unknown";
 export type Match = "main" | "probe" | "followup" | null;
-export type CellStatus = "asked" | "answered_elsewhere" | "omitted" | "missing";
+export type CellStatus = "asked" | "answered_elsewhere" | "omitted" | "explained" | "missing";
+export type DecisionReason = "not_asked" | "not_relevant" | "other";
+export type EditKind = "correction" | "smoothing";
 export type LinkType = "anticipated" | "later" | "unasked";
 
 export interface Project {
   id: number;
   name: string;
   hotwords: string;
+  smoothing_tags?: string;
   created_at: string;
 }
 
@@ -70,6 +73,8 @@ export interface Guide {
 
 export interface ProjectDetail {
   project: Project;
+  /** effective smoothing tags (defaults when the project has none) */
+  tags: string[];
   guide: Guide | null;
   guide_text: string;
   guide_error: string | null;
@@ -142,11 +147,17 @@ export interface Suggestion extends Passage {
   score: number | null;
 }
 
+export interface Decision {
+  reason: DecisionReason;
+  note: string;
+}
+
 export interface Cell {
   status: CellStatus;
   exchanges: Exchange[];
   links: Link[];
   suggestions: Suggestion[];
+  decision: Decision | null;
 }
 
 export interface Compare {
@@ -157,10 +168,25 @@ export interface Compare {
 }
 
 export interface Word {
+  /** effective text (empty when deleted) */
   t: string;
   s: number;
   e: number;
   p: number;
+  /** original text, only for edited words */
+  o?: string;
+  k?: EditKind;
+  /** smoothing tag, only for smoothing edits */
+  g?: string;
+}
+
+export interface Edit {
+  turn: number;
+  word: number;
+  action: "replace" | "delete";
+  kind: EditKind;
+  text: string;
+  tag: string;
 }
 
 export interface Turn {
@@ -186,6 +212,53 @@ export interface InterviewDetail {
   questions: AskedQuestion[];
   links: Link[];
   cells: Record<string, Cell>;
+  reviewed: boolean;
+  edits_stale: boolean;
+  decisions: { guide_code: string; reason: DecisionReason; note: string }[];
+  edits: Edit[];
+}
+
+export interface Extract {
+  id: number;
+  interview: string;
+  guide_code: string;
+  turn: number;
+  first: number;
+  last: number;
+  start: number;
+  end: number;
+  /** effective passage text */
+  text: string;
+  paraphrase: string;
+  updated_at: string;
+}
+
+export interface WorkflowStep {
+  id: string;
+  title: string;
+  text: string;
+}
+
+export interface WorkflowInterview {
+  id: string;
+  transcribed: boolean;
+  reviewed: boolean;
+  corrections: number;
+  smoothing: number;
+  edits_stale: boolean;
+  asked: number;
+  answered_elsewhere: number;
+  omitted: number;
+  explained: number;
+  missing: string[];
+  unassigned: number;
+  extracts: number;
+}
+
+export interface Workflow {
+  guide_questions: number;
+  steps: WorkflowStep[];
+  interviews: WorkflowInterview[];
 }
 
 export class ApiError extends Error {

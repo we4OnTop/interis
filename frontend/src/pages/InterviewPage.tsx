@@ -1,11 +1,17 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CornerUpRightIcon, LoaderIcon, MessageCircleQuestionIcon } from "lucide-react";
+import { CornerUpRightIcon, EraserIcon, LoaderIcon, MessageCircleQuestionIcon, PencilIcon, QuoteIcon, RefreshCwIcon, Undo2Icon } from "lucide-react";
 
 import { StatusDot } from "@/components/review";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { api, enc, type AskedQuestion, type InterviewDetail, type Link, type Speaker, type Turn } from "@/lib/api";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { api, enc, type AskedQuestion, type EditKind, type InterviewDetail, type Link, type Speaker, type Turn } from "@/lib/api";
+import { useStoredFlag } from "@/lib/compare";
 import { useFeedback } from "@/lib/feedback";
 import { clock, partAt, STATUS_LABEL, stamp, tagText } from "@/lib/format";
 import { usePlayer, usePlayerState } from "@/lib/player";
@@ -42,6 +48,26 @@ export function InterviewPage({ id, focusTurn }: { id: string; focusTurn: number
 
 const ROLE_LABEL: Record<string, string> = { interviewer: "Interviewer", interviewee: "Befragte:r", unknown: "unbekannt" };
 
+type Mode = "read" | "correct" | "smooth";
+const MODES: { id: Mode; label: string; hint: string }[] = [
+  { id: "read", label: "Lesen", hint: "Auf ein Wort klicken → ab dort anhören." },
+  { id: "correct", label: "Korrigieren", hint: "Falsch erkannte Wörter anklicken oder markieren und ersetzen." },
+  { id: "smooth", label: "Glätten", hint: "Füllwörter, Wiederholungen und Abbrüche markieren, entfernen oder ersetzen – mit Grund." },
+];
+
+/** An edit being prepared in the dialog. Spans are word indices, which never move. */
+interface EditDraft {
+  span: Span;
+  original: string;
+  /** leading whitespace of the first word: words carry their own space, so a replacement keeps it */
+  lead: string;
+  action: "replace" | "delete";
+  kind: EditKind;
+  text: string;
+  tag: string;
+  hasEdits: boolean;
+}
+
 function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn: number | null; onChanged: () => void }) {
   const { detail, source } = useProject();
   const review = useReview();
@@ -51,6 +77,9 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
   const pid = detail!.project.id;
   const container = useRef<HTMLDivElement>(null);
   const [sel, setSel] = useState<{ span: Span; x: number; y: number } | null>(null);
+  const [mode, setMode] = useState<Mode>("read");
+  const [showEdits, setShowEdits] = useStoredFlag("interis.showEdits", false);
+  const [edit, setEdit] = useState<EditDraft | null>(null);
   const speakers = useMemo(() => Object.fromEntries(d.speakers.map((s) => [s.label, s])), [d.speakers]);
 
   // questions and confirmed links per turn
@@ -86,7 +115,11 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
         let first = Number(a.dataset.wi);
         let last = Number(b.dataset.wi);
         if (first > last) [first, last] = [last, first];
-        const text = d.turns[turn].words.slice(first, last + 1).map((w) => w.t).join("").trim();
+        const text = d.turns[turn].words
+          .slice(first, last + 1)
+          .map((w) => w.t)
+          .join("")
+          .trim();
         const r = s.getRangeAt(0).getBoundingClientRect();
         setSel({ span: { turn, first, last, text }, x: r.left, y: r.top });
       }, 0);
@@ -101,13 +134,87 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
     };
   }, [d.turns, fail]);
 
-  const onWord = useCallback(
-    (t: number) => {
-      if (window.getSelection()?.isCollapsed === false) return;
-      player.play(source(d.id), t + 0.15);
+  const openEdit = useCallback(
+    (span: Span, action: "replace" | "delete", kind: EditKind) => {
+      const words = d.turns[span.turn].words.slice(span.first, span.last + 1);
+      setEdit({
+        span,
+        original: words
+          .map((w) => w.o ?? w.t)
+          .join("")
+          .trim(),
+        lead: (words[0]?.o ?? words[0]?.t ?? "").match(/^\s*/)?.[0] ?? "",
+        action,
+        kind,
+        text: action === "replace" ? span.text : "",
+        tag: "",
+        hasEdits: d.edits.some((e) => e.turn === span.turn && e.word >= span.first && e.word <= span.last),
+      });
     },
-    [player, source, d.id],
+    [d],
   );
+
+  const onWordClick = useCallback(
+    (ti: number, wi: number) => {
+      if (window.getSelection()?.isCollapsed === false) return;
+      const w = d.turns[ti].words[wi];
+      if (mode === "correct") openEdit({ turn: ti, first: wi, last: wi, text: w.t.trim() }, "replace", "correction");
+      else player.play(source(d.id), w.s + 0.15);
+    },
+    [mode, d, openEdit, player, source],
+  );
+
+  const saveEdit = async () => {
+    if (!edit) return;
+    const { span, action, kind, text, tag, lead } = edit;
+    try {
+      await api("POST", `/api/interviews/${enc(d.id)}/edits`, {
+        turn: span.turn,
+        first: span.first,
+        last: span.last,
+        action,
+        kind,
+        text: action === "replace" ? lead + text.trim() : "",
+        tag: kind === "smoothing" ? tag : "",
+      });
+      setEdit(null);
+      notify("Änderung gespeichert");
+      onChanged();
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  const revertEdit = async () => {
+    if (!edit) return;
+    try {
+      await api("POST", `/api/interviews/${enc(d.id)}/edits/revert`, { turn: edit.span.turn, first: edit.span.first, last: edit.span.last });
+      setEdit(null);
+      notify("Änderung zurückgenommen");
+      onChanged();
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  const setReviewed = async (reviewed: boolean) => {
+    try {
+      await api("PUT", `/api/interviews/${enc(d.id)}/reviewed`, { reviewed });
+      onChanged();
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  const analyze = async () => {
+    try {
+      const r = await api<{ queued: number }>("POST", `/api/interviews/${enc(d.id)}/analyze`);
+      notify(r.queued ? "Analyse eingeplant" : "Analyse läuft bereits");
+      onChanged();
+    } catch (e) {
+      fail(e);
+    }
+  };
 
   const deleteLink = useCallback(
     async (lk: Link) => {
@@ -148,6 +255,40 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
           </div>
         </div>
 
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <div className="bg-muted inline-flex gap-0.5 rounded-lg p-0.5" role="group" aria-label="Bearbeitungsmodus">
+              {MODES.map((m) => (
+                <Button
+                  key={m.id}
+                  size="sm"
+                  variant={mode === m.id ? "secondary" : "ghost"}
+                  aria-pressed={mode === m.id}
+                  onClick={() => setMode(m.id)}
+                >
+                  {m.label}
+                </Button>
+              ))}
+            </div>
+            <label className="flex cursor-pointer items-center gap-1.5 text-sm">
+              <Checkbox checked={showEdits} onCheckedChange={(c) => setShowEdits(c === true)} />
+              Änderungen anzeigen
+            </label>
+            <label className="flex cursor-pointer items-center gap-1.5 text-sm">
+              <Checkbox checked={d.reviewed} onCheckedChange={(c) => void setReviewed(c === true)} />
+              Korrektur abgeschlossen
+            </label>
+            {d.edits_stale && <Badge variant="suggest">Analyse veraltet</Badge>}
+            {d.edits_stale && (
+              <Button size="sm" variant="outline" onClick={() => void analyze()}>
+                <RefreshCwIcon />
+                Analyse aktualisieren
+              </Button>
+            )}
+          </div>
+          <p className="text-muted-foreground text-xs">{MODES.find((m) => m.id === mode)?.hint}</p>
+        </div>
+
         <div ref={container} className="bg-card rounded-xl border">
           {d.turns.map((turn, ti) => {
             const part = multi ? partAt(d.parts, turn.start).part : 0;
@@ -168,7 +309,9 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
                   questions={qByTurn.get(ti)}
                   links={lByTurn.get(ti)}
                   interview={d.id}
-                  onWord={onWord}
+                  mode={mode}
+                  showEdits={showEdits}
+                  onWordClick={onWordClick}
                   onDeleteLink={deleteLink}
                 />
               </div>
@@ -205,10 +348,14 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
           </CardContent>
         </Card>
         <div className="text-muted-foreground mt-4 space-y-2 px-1 text-xs">
-          <p>Text mit der Maus markieren → „Als Frage markieren“ oder „Antwort auf Frage …“.</p>
-          <p>Auf ein Wort klicken → ab dort anhören.</p>
+          <p>Text mit der Maus markieren → „Als Frage markieren“, „Antwort auf Frage …“ oder „Als Extrakt übernehmen …“.</p>
+          <p>Auf ein Wort klicken → ab dort anhören (Modus „Lesen“).</p>
           <p>
             <span className="word-low">unterstrichen</span> = unsicher erkannt
+          </p>
+          <p>
+            <span className="underline decoration-question decoration-2 underline-offset-2">unterstrichen</span> = korrigiert,{" "}
+            <span className="line-through">durchgestrichen</span> = geglättet (bei „Änderungen anzeigen“)
           </p>
         </div>
       </aside>
@@ -216,7 +363,7 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
       {sel && (
         <div
           data-selbar
-          className="bg-popover animate-in fade-in-0 fixed z-40 flex gap-1 rounded-lg border p-1 shadow-lg"
+          className="bg-popover animate-in fade-in-0 fixed z-40 flex flex-wrap gap-1 rounded-lg border p-1 shadow-lg"
           style={{ left: Math.max(8, sel.x), top: Math.max(64, sel.y - 48) }}
         >
           <Button
@@ -241,9 +388,143 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
             <CornerUpRightIcon />
             Antwort auf Frage …
           </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              review.extract(d.id, sel.span);
+              setSel(null);
+            }}
+          >
+            <QuoteIcon />
+            Als Extrakt übernehmen …
+          </Button>
+          {mode === "correct" && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                openEdit(sel.span, "replace", "correction");
+                setSel(null);
+              }}
+            >
+              <PencilIcon />
+              Ersetzen …
+            </Button>
+          )}
+          {mode === "smooth" && (
+            <>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  openEdit(sel.span, "delete", "smoothing");
+                  setSel(null);
+                }}
+              >
+                <EraserIcon />
+                Entfernen
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  openEdit(sel.span, "replace", "smoothing");
+                  setSel(null);
+                }}
+              >
+                <PencilIcon />
+                Ersetzen …
+              </Button>
+            </>
+          )}
         </div>
       )}
+
+      <EditDialog edit={edit} setEdit={setEdit} tags={detail!.tags} onSave={saveEdit} onRevert={revertEdit} />
     </div>
+  );
+}
+
+function EditDialog({
+  edit,
+  setEdit,
+  tags,
+  onSave,
+  onRevert,
+}: {
+  edit: EditDraft | null;
+  setEdit: (e: EditDraft | null) => void;
+  tags: string[];
+  onSave: () => void;
+  onRevert: () => void;
+}) {
+  const title = !edit
+    ? ""
+    : edit.kind === "correction"
+      ? "Wort korrigieren"
+      : edit.action === "delete"
+        ? "Text entfernen (Glättung)"
+        : "Text ersetzen (Glättung)";
+  const valid = !!edit && (edit.action === "delete" || edit.text.trim() !== "") && (edit.kind === "correction" || edit.tag !== "");
+  return (
+    <Dialog open={edit !== null} onOpenChange={(o) => !o && setEdit(null)}>
+      <DialogContent className="sm:max-w-xl">
+        {edit && (
+          <>
+            <DialogHeader>
+              <DialogTitle>{title}</DialogTitle>
+              <DialogDescription>Das Originaltranskript bleibt unverändert. Die Änderung wird separat gespeichert.</DialogDescription>
+            </DialogHeader>
+            <blockquote className="bg-muted max-h-32 overflow-auto rounded-md border-l-4 px-3 py-2 text-sm">{edit.original || "–"}</blockquote>
+            {edit.action === "replace" && (
+              <div className="grid gap-2">
+                <Label htmlFor="edit-text">{edit.kind === "correction" ? "Richtiger Text" : "Neuer Text"}</Label>
+                <Input id="edit-text" autoFocus value={edit.text} onChange={(e) => setEdit({ ...edit, text: e.target.value })} />
+                {edit.kind === "correction" && edit.span.last > edit.span.first && (
+                  <p className="text-muted-foreground text-xs">Mehrere Wörter: Die übrigen Wörter der Markierung werden leer.</p>
+                )}
+              </div>
+            )}
+            {edit.kind === "smoothing" && (
+              <div className="grid gap-2">
+                <Label>Grund</Label>
+                <Select value={edit.tag} onValueChange={(tag) => setEdit({ ...edit, tag })}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Grund wählen" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {tags.map((t) => (
+                      <SelectItem key={t} value={t}>
+                        {t}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            <DialogFooter className="sm:justify-between">
+              <div>
+                {edit.hasEdits && (
+                  <Button variant="ghost" onClick={onRevert}>
+                    <Undo2Icon />
+                    Änderung zurücknehmen
+                  </Button>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={() => setEdit(null)}>
+                  Abbrechen
+                </Button>
+                <Button disabled={!valid} onClick={onSave}>
+                  Speichern
+                </Button>
+              </div>
+            </DialogFooter>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -256,7 +537,9 @@ const TurnRow = memo(function TurnRow({
   questions,
   links,
   interview,
-  onWord,
+  mode,
+  showEdits,
+  onWordClick,
   onDeleteLink,
 }: {
   ti: number;
@@ -267,7 +550,9 @@ const TurnRow = memo(function TurnRow({
   questions: AskedQuestion[] | undefined;
   links: Link[] | undefined;
   interview: string;
-  onWord: (t: number) => void;
+  mode: Mode;
+  showEdits: boolean;
+  onWordClick: (ti: number, wi: number) => void;
   onDeleteLink: (lk: Link) => void;
 }) {
   const review = useReview();
@@ -285,6 +570,15 @@ const TurnRow = memo(function TurnRow({
           const startQ = questions?.find((x) => x.first === wi);
           const startLinks = links?.filter((l) => l.first === wi) ?? [];
           const inLink = links?.some((l) => l.first <= wi && wi <= l.last);
+          // edited words: a correction shows the new text underlined, a smoothing deletion shows the original struck through
+          const edited = w.k !== undefined;
+          const struck = showEdits && edited && w.t === "";
+          const underlined = showEdits && edited && w.t !== "";
+          const title = edited
+            ? `${w.k === "smoothing" ? `Glättung (${w.g ?? ""})` : "Korrektur"} – Original: „${w.o ?? ""}“`
+            : w.p < 0.5
+              ? `unsicher (${Math.round(w.p * 100)} %)`
+              : undefined;
           return (
             <span key={wi}>
               {startQ && (
@@ -312,16 +606,19 @@ const TurnRow = memo(function TurnRow({
               <span
                 data-ti={ti}
                 data-wi={wi}
-                onClick={() => onWord(w.s)}
-                title={w.p < 0.5 ? `unsicher (${Math.round(w.p * 100)} %)` : undefined}
+                onClick={() => onWordClick(ti, wi)}
+                title={title}
                 className={cn(
-                  "cursor-pointer rounded-sm hover:bg-accent",
+                  "rounded-sm hover:bg-accent",
+                  mode === "read" ? "cursor-pointer" : "cursor-text",
                   q && (q.guide_code && q.match !== "followup" ? "text-question font-medium" : "font-medium"),
                   inLink && "bg-linked-soft",
-                  w.p < 0.5 && "word-low",
+                  w.p < 0.5 && !edited && "word-low",
+                  underlined && "decoration-question underline decoration-2 underline-offset-2",
+                  struck && "text-muted-foreground",
                 )}
               >
-                {w.t}
+                {struck ? <s>{w.o}</s> : w.t}
               </span>
             </span>
           );

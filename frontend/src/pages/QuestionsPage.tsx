@@ -150,7 +150,7 @@ function QuestionNav({ data, ids, code, pid }: { data: Compare; ids: string[]; c
 function Legend() {
   return (
     <div className="text-muted-foreground flex flex-wrap gap-4 text-xs">
-      {(["asked", "answered_elsewhere", "omitted", "missing"] as const).map((s) => (
+      {(["asked", "answered_elsewhere", "omitted", "explained", "missing"] as const).map((s) => (
         <span key={s} className="flex items-center gap-1.5">
           <StatusDot status={s} />
           {STATUS_LABEL[s]}

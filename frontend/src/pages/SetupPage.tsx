@@ -36,7 +36,7 @@ export function SetupPage({ tab }: { tab: string | null }) {
           <GuideTab key={detail!.guide_text} />
         </TabsContent>
         <TabsContent value="settings">
-          <SettingsTab key={`${detail!.project.name}|${detail!.project.hotwords}`} />
+          <SettingsTab key={`${detail!.project.name}|${detail!.project.hotwords}|${detail!.project.smoothing_tags ?? ""}`} />
         </TabsContent>
       </Tabs>
     </div>
