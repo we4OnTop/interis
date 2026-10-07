@@ -79,7 +79,45 @@ CREATE TABLE IF NOT EXISTS answer_links (
     updated_at   TEXT NOT NULL,
     UNIQUE (interview_id, guide_code, turn, first, last)
 );
+-- Corrections (misrecognised words) and smoothing (Glättung), one row per word.
+-- Word indices never move, so all other positions stay valid.
+CREATE TABLE IF NOT EXISTS word_edits (
+    interview_id TEXT NOT NULL,
+    turn         INTEGER NOT NULL,
+    word         INTEGER NOT NULL,
+    action       TEXT NOT NULL CHECK (action IN ('replace', 'delete')),
+    kind         TEXT NOT NULL CHECK (kind IN ('correction', 'smoothing')),
+    text         TEXT NOT NULL DEFAULT '',
+    tag          TEXT NOT NULL DEFAULT '',
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (interview_id, turn, word)
+);
+-- Extraction: a passage of an answer, summarised in your own words for a guide question.
+CREATE TABLE IF NOT EXISTS extracts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    interview_id TEXT NOT NULL,
+    guide_code   TEXT NOT NULL,
+    turn         INTEGER NOT NULL,
+    first        INTEGER NOT NULL,
+    last         INTEGER NOT NULL,
+    paraphrase   TEXT NOT NULL DEFAULT '',
+    updated_at   TEXT NOT NULL
+);
+-- Why a guide question has no answer in an interview, when no passage answers it.
+CREATE TABLE IF NOT EXISTS question_decisions (
+    interview_id TEXT NOT NULL,
+    guide_code   TEXT NOT NULL,
+    reason       TEXT NOT NULL CHECK (reason IN ('not_asked', 'not_relevant', 'other')),
+    note         TEXT NOT NULL DEFAULT '',
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (interview_id, guide_code)
+);
 """
+
+
+# Tables whose rows refer to word positions of one interview.
+DECISION_TABLES = ("question_marks", "answer_links", "word_edits", "extracts",
+                   "question_decisions")
 
 
 def _now() -> str:
@@ -101,6 +139,12 @@ class Store:
             if "project_id" not in cols:  # databases from before projects existed
                 c.execute("ALTER TABLE interviews ADD COLUMN project_id INTEGER "
                           "REFERENCES projects(id)")
+            if "reviewed_at" not in cols:  # transcript check ("Korrektur abgeschlossen")
+                c.execute("ALTER TABLE interviews ADD COLUMN reviewed_at TEXT")
+            pcols = {r["name"] for r in c.execute("PRAGMA table_info(projects)")}
+            if "smoothing_tags" not in pcols:  # one tag per line, empty = defaults
+                c.execute("ALTER TABLE projects ADD COLUMN smoothing_tags TEXT NOT NULL "
+                          "DEFAULT ''")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -255,6 +299,97 @@ class Store:
         with self._conn() as c:
             c.execute("DELETE FROM answer_links WHERE id = ?", (link_id,))
 
+    # ---------------------------------------------------------------- transcript edits
+    def word_edits(self, interview_id: str) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM word_edits WHERE interview_id = ? "
+                             "ORDER BY turn, word", (interview_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_word_edits(self, interview_id: str, rows: list[dict[str, Any]]) -> None:
+        """Insert or replace the edits of single words (one row per word)."""
+        now = _now()
+        with self._conn() as c:
+            c.executemany(
+                "INSERT INTO word_edits (interview_id, turn, word, action, kind, text, tag, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(interview_id, turn, word) DO UPDATE SET action = excluded.action, "
+                "kind = excluded.kind, text = excluded.text, tag = excluded.tag, "
+                "updated_at = excluded.updated_at",
+                [(interview_id, r["turn"], r["word"], r["action"], r["kind"], r["text"],
+                  r["tag"], now) for r in rows])
+
+    def revert_word_edits(self, interview_id: str, turn: int, first: int, last: int) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM word_edits WHERE interview_id = ? AND turn = ? "
+                      "AND word BETWEEN ? AND ?", (interview_id, turn, first, last))
+
+    def reviewed(self, interview_id: str) -> bool:
+        with self._conn() as c:
+            row = c.execute("SELECT reviewed_at FROM interviews WHERE id = ?",
+                            (interview_id,)).fetchone()
+        return bool(row and row["reviewed_at"])
+
+    def set_reviewed(self, interview_id: str, reviewed: bool) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE interviews SET reviewed_at = ? WHERE id = ?",
+                      (_now() if reviewed else None, interview_id))
+
+    # ---------------------------------------------------------------- extracts
+    def extracts(self, interview_ids: list[str]) -> list[dict[str, Any]]:
+        if not interview_ids:
+            return []
+        marks = ",".join("?" * len(interview_ids))
+        with self._conn() as c:
+            rows = c.execute(
+                f"SELECT * FROM extracts WHERE interview_id IN ({marks}) "  # noqa: S608 – "?" only
+                "ORDER BY interview_id, turn, first", interview_ids).fetchall()
+        return [dict(r) for r in rows]
+
+    def extract(self, extract_id: int) -> dict[str, Any] | None:
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM extracts WHERE id = ?", (extract_id,)).fetchone()
+        return dict(row) if row else None
+
+    def add_extract(self, interview_id: str, guide_code: str, turn: int, first: int,
+                    last: int, paraphrase: str) -> int:
+        with self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO extracts (interview_id, guide_code, turn, first, last, paraphrase, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (interview_id, guide_code, turn, first, last, paraphrase, _now()))
+        return int(cur.lastrowid)
+
+    def update_extract(self, extract_id: int, paraphrase: str) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE extracts SET paraphrase = ?, updated_at = ? WHERE id = ?",
+                      (paraphrase, _now(), extract_id))
+
+    def delete_extract(self, extract_id: int) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM extracts WHERE id = ?", (extract_id,))
+
+    # ---------------------------------------------------------------- question decisions
+    def decisions(self, interview_id: str) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM question_decisions WHERE interview_id = ?",
+                             (interview_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_decision(self, interview_id: str, guide_code: str, reason: str, note: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO question_decisions (interview_id, guide_code, reason, note, "
+                "updated_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(interview_id, guide_code) DO UPDATE SET reason = excluded.reason, "
+                "note = excluded.note, updated_at = excluded.updated_at",
+                (interview_id, guide_code, reason, note, _now()))
+
+    def delete_decision(self, interview_id: str, guide_code: str) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM question_decisions WHERE interview_id = ? AND guide_code = ?",
+                      (interview_id, guide_code))
+
     # ---------------------------------------------------------------- projects
     def create_project(self, name: str, hotwords: str = "") -> int:
         with self._conn() as c:
@@ -272,13 +407,17 @@ class Store:
             row = c.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         return dict(row) if row else None
 
-    def update_project(self, project_id: int, name: str | None, hotwords: str | None) -> None:
+    def update_project(self, project_id: int, name: str | None, hotwords: str | None,
+                       smoothing_tags: str | None = None) -> None:
         with self._conn() as c:
             if name is not None:
                 c.execute("UPDATE projects SET name = ? WHERE id = ?", (name, project_id))
             if hotwords is not None:
                 c.execute("UPDATE projects SET hotwords = ? WHERE id = ?",
                           (hotwords, project_id))
+            if smoothing_tags is not None:
+                c.execute("UPDATE projects SET smoothing_tags = ? WHERE id = ?",
+                          (smoothing_tags, project_id))
 
     # ---------------------------------------------------------------- jobs
     def add_job(self, kind: str, interview_id: str, options: dict[str, Any] | None = None,
@@ -330,16 +469,18 @@ class Store:
                       "WHERE status = 'running'")
 
     def delete_decisions(self, interview_id: str) -> None:
+        """Everything tied to word positions. Needed after a new transcription."""
         with self._conn() as c:
-            c.execute("DELETE FROM question_marks WHERE interview_id = ?", (interview_id,))
-            c.execute("DELETE FROM answer_links WHERE interview_id = ?", (interview_id,))
+            for table in DECISION_TABLES:
+                c.execute(f"DELETE FROM {table} WHERE interview_id = ?",  # noqa: S608 – constants
+                          (interview_id,))
+            c.execute("UPDATE interviews SET reviewed_at = NULL WHERE id = ?", (interview_id,))
 
     def delete_interview(self, interview_id: str) -> None:
         """Remove all review decisions and jobs of an interview (files: see the caller)."""
         with self._conn() as c:
-            for table, col in (("question_marks", "interview_id"),
-                               ("audio_parts", "interview_id"),
-                               ("answer_links", "interview_id"), ("jobs", "interview_id"),
-                               ("interviews", "id")):
+            for table, col in ((*((t, "interview_id") for t in DECISION_TABLES),
+                                ("audio_parts", "interview_id"), ("jobs", "interview_id"),
+                                ("interviews", "id"))):
                 c.execute(f"DELETE FROM {table} WHERE {col} = ?",  # noqa: S608 – constants
                           (interview_id,))
