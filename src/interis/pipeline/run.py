@@ -29,11 +29,12 @@ from interis.models import (
     verify_ready,
 )
 from interis.pipeline.asr import AsrOptions
-from interis.pipeline.cache import StepCache, params_key
+from interis.pipeline.cache import StepCache, combined_sha, params_key
 from interis.pipeline.merge import build_turns
 from interis.pipeline.types import Diarization, Segment, Transcript, to_dict
 
 SAMPLE_RATE = 16000
+PART_GAP_S = 2.0  # silence inserted between recording parts
 Progress = Callable[[str, float], None]
 _PACKAGES = ("faster-whisper", "ctranslate2", "torch", "transformers", "pyannote.audio",
              "numpy", "av")
@@ -57,19 +58,38 @@ def decode(path: Path) -> np.ndarray:
     return decode_audio(str(path), sampling_rate=SAMPLE_RATE)
 
 
-def run_pipeline(audio_path: Path, paths: Paths, opts: PipelineOptions,
+def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOptions,
                  progress: Progress | None = None) -> Transcript:
+    """Transcribe one interview. Several recordings (e.g. before and after a break) are
+    joined in the given order with a short silence and processed as one conversation,
+    so speakers keep the same label across the break."""
     require_offline()
     say = progress or (lambda _stage, _frac: None)
+    files = [audio_paths] if isinstance(audio_paths, Path) else list(audio_paths)
 
     say("hash", 0.0)
-    audio_sha = sha256_file(audio_path)
+    part_shas = []
+    for i, f in enumerate(files):
+        part_shas.append(sha256_file(f))
+        say("hash", (i + 1) / len(files))
+    audio_sha = combined_sha(part_shas)
     cache = StepCache(paths.cache, audio_sha)
 
     say("decode", 0.0)
-    audio = decode(audio_path)
+    chunks, parts, offset = [], [], 0.0
+    gap = np.zeros(int(PART_GAP_S * SAMPLE_RATE), dtype=np.float32)
+    for i, (f, sha) in enumerate(zip(files, part_shas, strict=True)):
+        if i:
+            chunks.append(gap)
+            offset += PART_GAP_S
+        x = decode(f)
+        chunks.append(x)
+        parts.append({"sha256": sha, "duration_s": round(len(x) / SAMPLE_RATE, 2),
+                      "offset_s": round(offset, 3)})
+        offset += len(x) / SAMPLE_RATE
+        say("decode", (i + 1) / len(files))
+    audio = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
     duration = len(audio) / SAMPLE_RATE
-    say("decode", 1.0)
 
     # --- transcribe
     asr_dir = verify_ready(paths, opts.asr_model)
@@ -118,7 +138,7 @@ def run_pipeline(audio_path: Path, paths: Paths, opts: PipelineOptions,
             diarization = Diarization.from_dict(cached)
             say("diarize", 1.0)
 
-    turns = build_turns(segments, diarization)
+    turns = build_turns(segments, diarization, [p["offset_s"] for p in parts[1:]])
     labels = sorted({t.speaker for t in turns if t.speaker is not None})
     speakers = [
         {"label": label, "role": "unknown", "display_name": label,
@@ -134,7 +154,7 @@ def run_pipeline(audio_path: Path, paths: Paths, opts: PipelineOptions,
         "note": "Raw machine transcript – not reviewed.",
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "interis_version": interis.__version__,
-        "audio": {"sha256": audio_sha, "duration_s": round(duration, 2)},
+        "audio": {"sha256": audio_sha, "duration_s": round(duration, 2), "parts": parts},
         "language": "de",
         "models": {k: {"repo": MODELS[k].repo, "revision": MODELS[k].revision,
                        "license": MODELS[k].license} for k in used},

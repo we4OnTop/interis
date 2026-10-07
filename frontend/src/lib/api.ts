@@ -1,0 +1,268 @@
+// Typed access to the local Interis backend. Every request carries the custom header the
+// backend requires for state changes (CSRF protection) and the session cookie.
+
+export type Role = "interviewer" | "interviewee" | "unknown";
+export type Match = "main" | "probe" | "followup" | null;
+export type CellStatus = "asked" | "answered_elsewhere" | "omitted" | "missing";
+export type LinkType = "anticipated" | "later" | "unasked";
+
+export interface Project {
+  id: number;
+  name: string;
+  hotwords: string;
+  created_at: string;
+}
+
+export interface ProjectSummary extends Project {
+  interviews: number;
+  transcribed: number;
+  questions: number;
+  active_jobs: number;
+}
+
+export interface Job {
+  id: number;
+  kind: "transcribe" | "analyze";
+  interview_id: string;
+  status: "queued" | "running" | "done" | "failed" | "cancelled";
+  options: { model?: string };
+  stage: string;
+  progress: number;
+  message: string;
+  started_at: string | null;
+  queue_pos: number | null;
+}
+
+export interface Part {
+  idx: number;
+  ext: string;
+  exists: boolean;
+  size: number | null;
+  uploaded: boolean;
+  offset_s: number | null;
+  duration_s: number | null;
+}
+
+export interface InterviewRow {
+  id: string;
+  transcribed: boolean;
+  duration_s: number | null;
+  parts: Part[];
+  parts_changed: boolean;
+  has_audio: boolean;
+  has_roles: boolean;
+  guide_mismatch: boolean;
+  job: Job | null;
+}
+
+export interface GuideQuestion {
+  code: string;
+  text: string;
+  section: string | null;
+  variants: string[];
+  probes: string[];
+}
+
+export interface Guide {
+  title: string | null;
+  questions: GuideQuestion[];
+}
+
+export interface ProjectDetail {
+  project: Project;
+  guide: Guide | null;
+  guide_text: string;
+  guide_error: string | null;
+  interviews: InterviewRow[];
+  next_id: string;
+  models: string[];
+}
+
+export interface AskedQuestion {
+  id: string;
+  turn: number;
+  first: number;
+  last: number;
+  start: number;
+  end: number;
+  text: string;
+  speaker: string | null;
+  match: Match;
+  guide_code: string | null;
+  status: string;
+}
+
+export interface Piece {
+  text: string;
+  question?: boolean;
+  code?: string | null;
+  match?: Match;
+  turn?: number;
+  first?: number;
+  last?: number;
+  status?: string;
+}
+
+export interface DialogueTurn {
+  turn: number;
+  start: number;
+  end: number;
+  n_words: number;
+  speaker: string;
+  role: Role;
+  pieces: Piece[];
+}
+
+export interface Exchange {
+  question: AskedQuestion;
+  start: number;
+  dialogue: DialogueTurn[];
+}
+
+export interface Passage {
+  turn: number;
+  first: number;
+  last: number;
+  start: number;
+  end: number;
+  text: string;
+  type: LinkType;
+  from_code: string | null;
+}
+
+export interface Link extends Passage {
+  id: number;
+  guide_code: string;
+  status: "confirmed" | "rejected";
+  omitted: boolean;
+  note: string;
+}
+
+export interface Suggestion extends Passage {
+  score: number | null;
+}
+
+export interface Cell {
+  status: CellStatus;
+  exchanges: Exchange[];
+  links: Link[];
+  suggestions: Suggestion[];
+}
+
+export interface Compare {
+  guide: Guide | null;
+  interviews: string[];
+  cells: Record<string, Record<string, Cell>>;
+  unassigned: Record<string, AskedQuestion[]>;
+}
+
+export interface Word {
+  t: string;
+  s: number;
+  e: number;
+  p: number;
+}
+
+export interface Turn {
+  speaker: string | null;
+  start: number;
+  end: number;
+  words: Word[];
+}
+
+export interface Speaker {
+  label: string;
+  role: Role;
+  display_name: string;
+  speaking_time_s: number;
+}
+
+export interface InterviewDetail {
+  id: string;
+  project: number;
+  parts: { offset_s: number; duration_s: number }[];
+  speakers: Speaker[];
+  turns: Turn[];
+  questions: AskedQuestion[];
+  links: Link[];
+  cells: Record<string, Cell>;
+}
+
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+let onUnauthorized: () => void = () => {};
+export function setUnauthorizedHandler(fn: () => void) {
+  onUnauthorized = fn;
+}
+
+async function detail(res: Response): Promise<string> {
+  const text = await res.text();
+  try {
+    const d = JSON.parse(text).detail;
+    return typeof d === "string" ? d : JSON.stringify(d);
+  } catch {
+    return text || res.statusText;
+  }
+}
+
+export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method,
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", "X-Interis": "1" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (res.status === 401) {
+    onUnauthorized();
+    throw new ApiError(401, "Nicht angemeldet");
+  }
+  if (!res.ok) throw new ApiError(res.status, await detail(res));
+  return (await res.json()) as T;
+}
+
+/** Raw file upload with progress (fetch cannot report upload progress). */
+export function uploadFile(
+  path: string,
+  file: Blob,
+  onProgress: (fraction: number) => void,
+): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", path);
+    xhr.setRequestHeader("X-Interis", "1");
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(JSON.parse(xhr.responseText));
+      let msg = xhr.responseText;
+      try {
+        msg = JSON.parse(msg).detail;
+      } catch {
+        /* plain text */
+      }
+      reject(new ApiError(xhr.status, msg));
+    };
+    xhr.onerror = () => reject(new ApiError(0, "Verbindung unterbrochen"));
+    xhr.send(file);
+  });
+}
+
+export async function postFile<T>(path: string, file: Blob): Promise<T> {
+  const res = await fetch(path, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "X-Interis": "1", "Content-Type": "application/octet-stream" },
+    body: file,
+  });
+  if (!res.ok) throw new ApiError(res.status, await detail(res));
+  return (await res.json()) as T;
+}
+
+export const enc = encodeURIComponent;

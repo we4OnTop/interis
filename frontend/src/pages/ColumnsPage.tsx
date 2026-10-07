@@ -1,0 +1,131 @@
+import { Fragment } from "react";
+import { LoaderIcon, PencilIcon } from "lucide-react";
+
+import { InterviewFilter } from "@/components/InterviewFilter";
+import { CellContent, PlayButton, StatusBadge, Time } from "@/components/review";
+import { Button } from "@/components/ui/button";
+import { useCompare, useHidden, useStoredFlag } from "@/lib/compare";
+import { clock } from "@/lib/format";
+import { useProject } from "@/lib/project";
+import { ReviewProvider, useReview } from "@/lib/review";
+import { href } from "@/lib/router";
+import type { AskedQuestion } from "@/lib/api";
+
+/** Side by side: one row per guide question, one column per interview. */
+export function ColumnsPage() {
+  const { detail, interview } = useProject();
+  const pid = detail!.project.id;
+  const { data, reload } = useCompare();
+  const { hidden, toggle } = useHidden(pid);
+  const [showSuggestions, setShowSuggestions] = useStoredFlag("interis.suggestions", true);
+
+  if (!data) return <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
+  if (!data.guide || !data.interviews.length)
+    return (
+      <p className="text-muted-foreground p-6 text-sm">
+        Noch nichts zu vergleichen. <a className="underline" href={href.setup(pid)}>Leitfaden & Gespräche einrichten</a>
+      </p>
+    );
+
+  const ids = data.interviews.filter((id) => !hidden.has(id));
+  let section: string | null = null;
+
+  return (
+    <ReviewProvider guide={data.guide} onChanged={reload}>
+      <div className="flex h-[calc(100vh-3.5rem)] flex-col">
+        <div className="border-b px-6 py-3">
+          <InterviewFilter ids={data.interviews} hidden={hidden} toggle={toggle} showSuggestions={showSuggestions} setShowSuggestions={setShowSuggestions} />
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto px-6 pt-4 pb-24">
+          <div
+            className="bg-card grid w-max min-w-full rounded-lg border text-sm"
+            style={{ gridTemplateColumns: `minmax(220px, 280px) repeat(${ids.length}, minmax(340px, 440px))` }}
+          >
+            <div className="bg-card sticky top-0 left-0 z-30 border-r border-b p-3 font-semibold">Leitfaden</div>
+            {ids.map((id) => {
+              const iv = interview(id);
+              return (
+                <div key={id} className="bg-card sticky top-0 z-20 border-r border-b p-3">
+                  <a href={href.interview(pid, id)} className="font-mono font-semibold hover:underline">
+                    {id}
+                  </a>
+                  <p className="text-muted-foreground text-xs">
+                    {iv?.duration_s ? clock(iv.duration_s) : ""}
+                    {iv && iv.parts.length > 1 ? ` · ${iv.parts.length} Teile` : ""}
+                    {iv && !iv.has_roles ? " · Rollen unklar" : ""}
+                  </p>
+                  {iv?.guide_mismatch && <p className="text-suggest text-xs">mit älterem Leitfaden analysiert</p>}
+                </div>
+              );
+            })}
+
+            {data.guide.questions.map((q) => {
+              const heading = q.section && q.section !== section ? q.section : null;
+              section = q.section;
+              return (
+                <Fragment key={q.code}>
+                  {heading && (
+                    <div className="bg-muted sticky left-0 border-b px-3 py-1.5 text-xs font-semibold tracking-wide uppercase" style={{ gridColumn: "1 / -1" }}>
+                      {heading}
+                    </div>
+                  )}
+                  <div className="bg-muted/40 sticky left-0 z-10 border-r border-b p-3">
+                    <a href={href.questions(pid, q.code)} className="hover:underline">
+                      <span className="text-question mr-1.5 font-semibold">{q.code}</span>
+                      {q.text}
+                    </a>
+                    {q.variants.length > 0 && <p className="text-muted-foreground mt-1 text-xs">auch: {q.variants.join(" · ")}</p>}
+                  </div>
+                  {ids.map((id) => {
+                    const cell = data.cells[id][q.code];
+                    return (
+                      <div key={id} className="min-w-0 space-y-2 border-r border-b p-3">
+                        <div className="flex flex-wrap items-center gap-1">
+                          <StatusBadge status={cell.status} short />
+                          {cell.exchanges.map((ex, i) => (
+                            <Time key={i} id={id} t={ex.start} />
+                          ))}
+                        </div>
+                        <div className="max-h-[28rem] overflow-y-auto">
+                          <CellContent id={id} code={q.code} cell={cell} showSuggestions={showSuggestions} onChanged={reload} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </Fragment>
+              );
+            })}
+
+            <div className="bg-muted sticky left-0 border-b px-3 py-1.5 text-xs font-semibold tracking-wide uppercase" style={{ gridColumn: "1 / -1" }}>
+              Fragen ohne Leitfaden-Zuordnung
+            </div>
+            <div className="bg-muted/40 text-muted-foreground sticky left-0 z-10 border-r p-3 text-xs">
+              Spontane Nachfragen. Mit dem Stift einer Leitfadenfrage zuordnen, falls es eine war.
+            </div>
+            {ids.map((id) => (
+              <UnassignedCell key={id} id={id} list={data.unassigned[id] ?? []} />
+            ))}
+          </div>
+        </div>
+      </div>
+    </ReviewProvider>
+  );
+}
+
+function UnassignedCell({ id, list }: { id: string; list: AskedQuestion[] }) {
+  const review = useReview();
+  return (
+    <div className="space-y-1 border-r p-3">
+      {list.length === 0 && <span className="text-muted-foreground text-xs">–</span>}
+      {list.map((q) => (
+        <div key={q.id} className="group flex items-start gap-1 text-sm">
+          <PlayButton id={id} start={q.start} end={q.end} />
+          <span className="flex-1">{q.text}</span>
+          <Button variant="ghost" size="icon-xs" className="opacity-50 group-hover:opacity-100" onClick={() => review.editQuestion(id, { ...q })}>
+            <PencilIcon />
+          </Button>
+        </div>
+      ))}
+    </div>
+  );
+}

@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS interviews (
     audio_path  TEXT,
     added_at    TEXT NOT NULL
 );
+-- The recordings of an interview in playing order (several if there was a break).
+CREATE TABLE IF NOT EXISTS audio_parts (
+    interview_id TEXT NOT NULL,
+    idx          INTEGER NOT NULL,
+    path         TEXT NOT NULL,
+    sha256       TEXT,
+    PRIMARY KEY (interview_id, idx)
+);
 -- Transcriptions / re-analyses started from the website, run one at a time.
 CREATE TABLE IF NOT EXISTS jobs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,17 +108,53 @@ class Store:
 
     # ---------------------------------------------------------------- interviews
     def register_interview(self, interview_id: str, audio_path: Path | None) -> None:
-        with self._conn() as c:
-            c.execute(
-                "INSERT INTO interviews (id, audio_path, added_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET audio_path = excluded.audio_path",
-                (interview_id, str(audio_path) if audio_path else None, _now()),
-            )
+        self.register_parts(interview_id, [audio_path] if audio_path else [])
 
-    def add_interview(self, interview_id: str, project_id: int, audio_path: Path) -> None:
+    def add_interview(self, interview_id: str, project_id: int,
+                      audio_path: Path | None = None) -> None:
         with self._conn() as c:
-            c.execute("INSERT INTO interviews (id, audio_path, added_at, project_id) "
-                      "VALUES (?, ?, ?, ?)", (interview_id, str(audio_path), _now(), project_id))
+            c.execute("INSERT INTO interviews (id, added_at, project_id) VALUES (?, ?, ?)",
+                      (interview_id, _now(), project_id))
+        if audio_path is not None:
+            self.add_part(interview_id, audio_path)
+
+    # ---------------------------------------------------------------- recording parts
+    def parts(self, interview_id: str) -> list[dict[str, Any]]:
+        """[{idx, path, sha256}] in playing order (legacy single audio_path included)."""
+        with self._conn() as c:
+            rows = c.execute("SELECT idx, path, sha256 FROM audio_parts WHERE interview_id = ? "
+                             "ORDER BY idx", (interview_id,)).fetchall()
+            if not rows:
+                row = c.execute("SELECT audio_path FROM interviews WHERE id = ?",
+                                (interview_id,)).fetchone()
+                if row and row["audio_path"]:
+                    return [{"idx": 0, "path": Path(row["audio_path"]), "sha256": None}]
+        return [{"idx": r["idx"], "path": Path(r["path"]), "sha256": r["sha256"]} for r in rows]
+
+    def part_paths(self, interview_id: str) -> list[Path]:
+        return [p["path"] for p in self.parts(interview_id)]
+
+    def add_part(self, interview_id: str, path: Path, sha256: str | None = None) -> int:
+        with self._conn() as c:
+            row = c.execute("SELECT COALESCE(MAX(idx) + 1, 0) AS n FROM audio_parts "
+                            "WHERE interview_id = ?", (interview_id,)).fetchone()
+            c.execute("INSERT INTO audio_parts VALUES (?, ?, ?, ?)",
+                      (interview_id, row["n"], str(path), sha256))
+        return int(row["n"])
+
+    def set_parts(self, interview_id: str, parts: list[tuple[Path, str | None]]) -> None:
+        """Replace the parts (new order / removed part)."""
+        with self._conn() as c:
+            c.execute("DELETE FROM audio_parts WHERE interview_id = ?", (interview_id,))
+            c.executemany("INSERT INTO audio_parts VALUES (?, ?, ?, ?)",
+                          [(interview_id, i, str(p), sha) for i, (p, sha) in enumerate(parts)])
+
+    def register_parts(self, interview_id: str, paths: list[Path]) -> None:
+        """Command line: the interview was transcribed from these files."""
+        with self._conn() as c:
+            c.execute("INSERT INTO interviews (id, added_at) VALUES (?, ?) "
+                      "ON CONFLICT(id) DO NOTHING", (interview_id, _now()))
+        self.set_parts(interview_id, [(p, None) for p in paths])
 
     def interview_ids(self) -> set[str]:
         with self._conn() as c:
@@ -137,10 +181,9 @@ class Store:
                     (iid, _now(), project_id))
 
     def audio_path(self, interview_id: str) -> Path | None:
-        with self._conn() as c:
-            row = c.execute("SELECT audio_path FROM interviews WHERE id = ?",
-                            (interview_id,)).fetchone()
-        return Path(row["audio_path"]) if row and row["audio_path"] else None
+        """First recording part (kept for single-file callers)."""
+        paths = self.part_paths(interview_id)
+        return paths[0] if paths else None
 
     # ---------------------------------------------------------------- questions
     def question_marks(self, interview_id: str) -> list[dict[str, Any]]:
@@ -280,10 +323,16 @@ class Store:
             c.execute("UPDATE jobs SET status = 'queued', stage = '', progress = 0 "
                       "WHERE status = 'running'")
 
+    def delete_decisions(self, interview_id: str) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM question_marks WHERE interview_id = ?", (interview_id,))
+            c.execute("DELETE FROM answer_links WHERE interview_id = ?", (interview_id,))
+
     def delete_interview(self, interview_id: str) -> None:
         """Remove all review decisions and jobs of an interview (files: see the caller)."""
         with self._conn() as c:
             for table, col in (("question_marks", "interview_id"),
+                               ("audio_parts", "interview_id"),
                                ("answer_links", "interview_id"), ("jobs", "interview_id"),
                                ("interviews", "id")):
                 c.execute(f"DELETE FROM {table} WHERE {col} = ?",  # noqa: S608 – constants

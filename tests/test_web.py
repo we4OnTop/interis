@@ -186,35 +186,88 @@ def test_guide_change_queues_reanalysis(client, data_dir):
     assert client.post("/api/projects/1/reanalyze", headers=H).json() == {"reanalyze": 0}
 
 
-def test_upload_stores_audio_under_id_and_queues_transcription(client, data_dir):
-    r = client.post("/api/projects/1/interviews?interview=I01&ext=M4A", headers=H,
-                    content=b"\x00" * 5000)
-    assert r.status_code == 200
+def _new_interview(client, iid="I01", parts=(b"\x00" * 5000,), ext="m4a"):
+    assert client.post("/api/projects/1/interviews", headers=H,
+                       json={"interview": iid}).status_code == 200
+    for content in parts:
+        r = client.post(f"/api/interviews/{iid}/parts?ext={ext}", headers=H, content=content)
+        assert r.status_code == 200, r.text
+
+
+def test_upload_parts_and_start_transcription(client, data_dir):
+    _new_interview(client, parts=(b"a" * 5000, b"b" * 300))
     store = Store(data_dir.root / "interis.db")
-    assert store.audio_path("I01") == data_dir.audio / "I01.m4a"
-    assert (data_dir.audio / "I01.m4a").stat().st_size == 5000
-    assert store.project_of("I01") == 1
-    job = store.jobs(["I01"])[0]
-    assert job["kind"] == "transcribe" and job["options"] == {"model": "whisper-large-v3"}
+    assert store.part_paths("I01") == [data_dir.audio / "I01-1.m4a", data_dir.audio / "I01-2.m4a"]
+    assert (data_dir.audio / "I01-1.m4a").stat().st_size == 5000
+    assert store.project_of("I01") == 1 and store.jobs(["I01"]) == []  # draft, not started
+
     row = next(i for i in client.get("/api/projects/1").json()["interviews"] if i["id"] == "I01")
-    assert not row["transcribed"] and row["job"]["queue_pos"] == 0
+    assert [p["size"] for p in row["parts"]] == [5000, 300] and not row["transcribed"]
+
+    # reorder: second recording first
+    assert client.put("/api/interviews/I01/parts", headers=H, json={"order": [1, 0]}).json()
+    assert store.part_paths("I01")[0].name == "I01-2.m4a"
+    assert client.put("/api/interviews/I01/parts", headers=H,
+                      json={"order": [0]}).status_code == 422
+
+    r = client.post("/api/interviews/I01/transcribe", headers=H,
+                    json={"model": "whisper-large-v3-turbo"})
+    job = store.job(r.json()["job"])
+    assert job["kind"] == "transcribe" and job["options"] == {"model": "whisper-large-v3-turbo"}
+    # no changes while the job is pending
+    assert client.post("/api/interviews/I01/parts?ext=wav", headers=H,
+                       content=b"x").status_code == 409
+    assert client.delete("/api/interviews/I01/parts/0", headers=H).status_code == 409
 
 
-@pytest.mark.parametrize("query, status", [
-    ("interview=I01&ext=exe", 422),
-    ("interview=../x&ext=wav", 422),
-    ("interview=T1&ext=wav", 409),               # already exists
-    ("interview=I02&ext=wav&model=evil", 422),
+def test_remove_part_deletes_only_the_upload(client, data_dir):
+    _new_interview(client, parts=(b"a", b"b"))
+    assert client.delete("/api/interviews/I01/parts/0", headers=H).status_code == 200
+    assert not (data_dir.audio / "I01-1.m4a").exists()
+    assert Store(data_dir.root / "interis.db").part_paths("I01") == [data_dir.audio / "I01-2.m4a"]
+
+
+def test_start_needs_a_recording(client):
+    client.post("/api/projects/1/interviews", headers=H, json={"interview": "I01"})
+    assert client.post("/api/interviews/I01/transcribe", headers=H,
+                       json={}).status_code == 422
+
+
+def test_retranscription_requires_confirmation_when_markings_exist(client, data_dir):
+    store = Store(data_dir.root / "interis.db")
+    audio = data_dir.root / "orig.wav"
+    audio.write_bytes(b"RIFF")
+    store.register_interview("T1", audio)
+    client.post("/api/links", headers=H, json={"interview": "T1", "turn": 1, "first": 0,
+                                               "last": 2, "guide_code": "F4"})
+    assert client.post("/api/interviews/T1/transcribe", headers=H,
+                       json={}).status_code == 409
+    assert client.post("/api/interviews/T1/transcribe", headers=H,
+                       json={"discard_markings": True}).status_code == 200
+    assert store.links("T1") == []
+
+
+@pytest.mark.parametrize("iid, ext, status", [
+    ("I01", "exe", 422),
+    ("I01", "wav", 200),
 ])
-def test_upload_rejects_bad_input(client, data_dir, query, status):
-    r = client.post(f"/api/projects/1/interviews?{query}", headers=H, content=b"x")
+def test_part_extension_allow_list(client, iid, ext, status):
+    client.post("/api/projects/1/interviews", headers=H, json={"interview": iid})
+    r = client.post(f"/api/interviews/{iid}/parts?ext={ext}", headers=H, content=b"x")
     assert r.status_code == status
-    assert not any(data_dir.audio.glob("*")) if data_dir.audio.exists() else True
 
 
-def test_upload_needs_csrf_header(client):
-    r = client.post("/api/projects/1/interviews?interview=I01&ext=wav", content=b"x")
-    assert r.status_code == 403
+@pytest.mark.parametrize("iid, status", [("../x", 422), ("T1", 409), ("a b", 422)])
+def test_interview_id_rules(client, iid, status):
+    r = client.post("/api/projects/1/interviews", headers=H, json={"interview": iid})
+    assert r.status_code == status
+
+
+def test_parts_upload_needs_known_interview_and_csrf_header(client):
+    assert client.post("/api/interviews/nope/parts?ext=wav", headers=H,
+                       content=b"x").status_code == 404
+    client.post("/api/projects/1/interviews", headers=H, json={"interview": "I01"})
+    assert client.post("/api/interviews/I01/parts?ext=wav", content=b"x").status_code == 403
 
 
 def test_docx_guide_import(client):
@@ -286,10 +339,12 @@ def test_job_command_uses_project_guide_and_hotwords(data_dir):
     audio = data_dir.root / "a.wav"
     audio.write_bytes(b"RIFF")
     store.add_interview("I01", pid, audio)
+    store.add_part("I01", audio)
     guide = data_dir.root / "g.md"
     runner = JobRunner(data_dir, store, lambda _i: guide, lambda _i: "Müller SAP")
     cmd = runner.command(store.job(store.add_job("transcribe", "I01",
                                                  {"model": "whisper-large-v3-turbo"})))
+    assert cmd[cmd.index("transcribe") + 1:cmd.index("--id")] == [str(audio), str(audio)]
     assert cmd[:3] == [sys.executable, "-m", "interis.cli"]
     assert cmd[cmd.index("--id") + 1] == "I01"
     assert cmd[cmd.index("--guide") + 1] == str(guide)
@@ -313,13 +368,14 @@ def test_old_database_gets_project_column(tmp_path):
 
 
 def test_delete_interview_removes_files_and_decisions(client, data_dir):
-    client.post("/api/projects/1/interviews?interview=I01&ext=wav", headers=H, content=b"abc")
+    _new_interview(client, parts=(b"abc", b"def"), ext="wav")
+    client.post("/api/interviews/I01/transcribe", headers=H, json={})
     store = Store(data_dir.root / "interis.db")
     job = store.jobs(["I01"])[0]["id"]
     assert client.delete("/api/interviews/I01", headers=H).status_code == 409  # job pending
     client.post(f"/api/jobs/{job}/cancel", headers=H)
     assert client.delete("/api/interviews/I01", headers=H).status_code == 200
-    assert not (data_dir.audio / "I01.wav").exists() and store.project_of("I01") is None
+    assert not any(data_dir.audio.glob("I01*")) and store.project_of("I01") is None
 
     outside = data_dir.root / "original.wav"
     outside.write_bytes(b"RIFF")
@@ -330,3 +386,20 @@ def test_delete_interview_removes_files_and_decisions(client, data_dir):
     assert outside.exists(), "recordings outside the upload folder are never deleted"
     assert not (data_dir.exports / "T1").exists() and store.links("T1") == []
     assert client.delete("/api/interviews/..", headers=H).status_code in (404, 405)
+
+
+def test_exchange_shows_question_turn_even_if_next_question_is_in_same_turn():
+    from interis.web.review import interview_state
+    from tests.test_analysis import _interview
+
+    t = _interview()
+    t.analysis = analyze(t, AnalysisOptions(guide=parse_guide(GUIDE), match_threshold=0.9,
+                                            answer_z=0.5), None, FakeEncoder)
+    qs = [q for q in t.analysis["questions"] if q["match"] == "main"]
+    # simulate a diarization error: two guide questions inside one turn
+    second = {**qs[1], "turn": qs[0]["turn"], "first": qs[0]["last"] + 1,
+              "last": qs[0]["last"] + 1}
+    t.analysis["questions"] = [qs[0], second]
+    state = interview_state(t, [], [], parse_guide(GUIDE))
+    ex = state["cells"][qs[0]["guide_code"]]["exchanges"][0]
+    assert ex["dialogue"], "the question's own turn must be shown"

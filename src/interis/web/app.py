@@ -14,6 +14,7 @@ Security (see ARCHITECTURE.md §6):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import secrets
@@ -23,7 +24,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -37,13 +38,14 @@ from interis.analysis.guide import (
     parse_guide,
 )
 from interis.config import Paths
-from interis.models import ASR_MODELS, sha256_file
+from interis.models import ASR_MODELS
+from interis.pipeline.cache import combined_sha
 from interis.pipeline.types import Transcript
 from interis.web.jobs import JobRunner, guide_path_for
 from interis.web.review import guide_mismatch, interview_state, interviewer_of
 from interis.web.store import Store
 
-STATIC = Path(__file__).parent / "static"
+UI = Path(__file__).parent / "dist"  # built from frontend/ (npm run build)
 SESSION_COOKIE = "interis_session"
 CSRF_HEADER = "x-interis"
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
@@ -102,6 +104,21 @@ class ProjectCreate(BaseModel):
 class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     hotwords: str | None = Field(default=None, max_length=2000)
+
+
+class InterviewCreate(BaseModel):
+    interview: str = Field(max_length=40)
+
+
+class TranscribeRequest(BaseModel):
+    model: str = Field(default="whisper-large-v3", max_length=60)
+    # Re-transcribing changes all word positions, so earlier markings would point to
+    # the wrong words. They are removed – only after the user confirmed it.
+    discard_markings: bool = False
+
+
+class PartOrder(BaseModel):
+    order: list[int] = Field(max_length=100)
 
 
 class GuideText(BaseModel):
@@ -273,6 +290,48 @@ def create_app(paths: Paths, login_token: str, port: int,
         runner.notify()
         return n
 
+    def _parts_info(iid: str, t: Transcript | None) -> list[dict[str, Any]]:
+        out = []
+        timeline = t.parts if t else []
+        for i, part in enumerate(store.parts(iid)):
+            path = part["path"]
+            out.append({
+                "idx": part["idx"], "ext": path.suffix.lstrip("."), "sha256": part["sha256"],
+                "exists": path.is_file(),
+                "size": path.stat().st_size if path.is_file() else None,
+                "uploaded": path.parent == paths.audio,
+                "offset_s": timeline[i]["offset_s"] if i < len(timeline) else None,
+                "duration_s": timeline[i]["duration_s"] if i < len(timeline) else None,
+            })
+        return out
+
+    def _parts_changed(parts: list[dict[str, Any]], t: Transcript | None) -> bool:
+        """Recordings added, removed or reordered since the transcript was made."""
+        if t is None:
+            return False
+        recorded = [p.get("sha256") for p in t.meta["audio"].get("parts", [])]
+        if not recorded:  # transcript from before multi-part support
+            recorded = [t.meta["audio"]["sha256"]]
+        current = [p["sha256"] for p in parts]
+        if any(c is None for c in current):  # registered on the command line, unknown
+            return len(current) != len(recorded)
+        return current != recorded
+
+    def _interview_in_project(interview: str) -> int:
+        pid = store.project_of(interview) if INTERVIEW_ID.match(interview) else None
+        if pid is None:
+            raise HTTPException(404, "unknown interview")
+        return pid
+
+    def _not_busy(interview: str) -> None:
+        if any(j["status"] in ("queued", "running") for j in store.jobs([interview])):
+            raise HTTPException(409, "Erst den laufenden Auftrag abbrechen")
+
+    def _remove_upload(path: Path) -> None:
+        """Only copies made by the upload are ever deleted, never original recordings."""
+        if path.parent == paths.audio and path.is_file():
+            path.unlink()
+
     def _check_span(t: Transcript, s: Span | QuestionDelete, last: int | None = None) -> None:
         if s.turn >= len(t.turns):
             raise HTTPException(422, "turn out of range")
@@ -288,7 +347,11 @@ def create_app(paths: Paths, login_token: str, port: int,
     # ------------------------------------------------------------------ routes
     @app.get("/")
     def index() -> FileResponse:
-        return FileResponse(STATIC / "index.html")
+        index = UI / "index.html"
+        if not index.is_file():
+            return PlainTextResponse("Oberfläche nicht gebaut: im Ordner frontend `npm ci` und "
+                                     "`npm run build` ausführen.", status_code=500)
+        return FileResponse(index)
 
     @app.post("/api/login")
     def login(body: Login) -> Response:
@@ -341,12 +404,14 @@ def create_app(paths: Paths, login_token: str, port: int,
         interviews = []
         for iid in ids:
             t = transcripts.get(iid)
-            audio = store.audio_path(iid)
+            parts = _parts_info(iid, t)
             interviews.append({
                 "id": iid,
                 "transcribed": t is not None,
                 "duration_s": t.meta["audio"]["duration_s"] if t else None,
-                "has_audio": bool(audio and audio.exists()),
+                "parts": parts,
+                "parts_changed": _parts_changed(parts, t),
+                "has_audio": bool(parts) and all(x["exists"] for x in parts),
                 "has_roles": bool(t and interviewer_of(t) is not None),
                 "guide_mismatch": bool(t and guide_mismatch(t, guide)),
                 "job": latest.get(iid),
@@ -404,41 +469,90 @@ def create_app(paths: Paths, login_token: str, port: int,
             raise HTTPException(422, "Keine lesbare Word-Datei (.docx)") from e
 
     @app.post("/api/projects/{pid}/interviews")
-    async def upload_interview(pid: int, request: Request,
-                               interview: str = Query(max_length=40),
-                               ext: str = Query(max_length=8),
-                               model: str = Query("whisper-large-v3")) -> dict[str, Any]:
-        """The recording is streamed into the data directory as ``audio/<ID>.<ext>``."""
+    def create_interview(pid: int, body: InterviewCreate) -> dict[str, str]:
         _project(pid)
-        ext = ext.lower().lstrip(".")
-        if not INTERVIEW_ID.match(interview):
+        iid = body.interview.strip()
+        if not INTERVIEW_ID.match(iid):
             raise HTTPException(422, "Kürzel: nur Buchstaben, Ziffern, - und _ (max. 40)")
+        if iid in store.interview_ids() or (paths.exports / iid).exists():
+            raise HTTPException(409, f"Das Kürzel {iid} ist schon vergeben")
+        store.add_interview(iid, pid)
+        return {"id": iid}
+
+    @app.post("/api/interviews/{interview}/parts")
+    async def upload_part(interview: str, request: Request,
+                          ext: str = Query(max_length=8)) -> dict[str, int]:
+        """Streams one recording into ``<data>/audio/<ID>-<n>.<ext>``. The original file
+        name never reaches the server (it may contain real names)."""
+        _interview_in_project(interview)
+        _not_busy(interview)
+        ext = ext.lower().lstrip(".")
         if ext not in AUDIO_EXT:
             raise HTTPException(422, f"Dateityp .{ext} wird nicht unterstützt")
-        if model not in ASR_MODELS:
-            raise HTTPException(422, "unknown model")
-        if interview in store.interview_ids() or (paths.exports / interview).exists():
-            raise HTTPException(409, f"Das Kürzel {interview} ist schon vergeben")
         paths.audio.mkdir(parents=True, exist_ok=True)
-        target = paths.audio / f"{interview}.{ext}"
-        part = target.with_name(target.name + ".part")
+        n = 1
+        while any(paths.audio.glob(f"{interview}-{n}.*")):
+            n += 1
+        target = paths.audio / f"{interview}-{n}.{ext}"
+        tmp = target.with_name(target.name + ".upload")
+        digest = hashlib.sha256()
         size = 0
         try:
-            with part.open("wb") as f:
+            with tmp.open("wb") as f:
                 async for chunk in request.stream():
                     size += len(chunk)
                     if size > MAX_AUDIO_BYTES:
                         raise HTTPException(413, "Datei zu groß (max. 8 GB)")
+                    digest.update(chunk)
                     f.write(chunk)
             if size == 0:
                 raise HTTPException(422, "leere Datei")
-            part.replace(target)
+            tmp.replace(target)
         finally:
-            part.unlink(missing_ok=True)
-        store.add_interview(interview, pid, target)
-        job_id = store.add_job("transcribe", interview, {"model": model})
+            tmp.unlink(missing_ok=True)
+        return {"idx": store.add_part(interview, target, digest.hexdigest())}
+
+    @app.put("/api/interviews/{interview}/parts")
+    def order_parts(interview: str, body: PartOrder) -> dict[str, bool]:
+        _interview_in_project(interview)
+        _not_busy(interview)
+        parts = {p["idx"]: p for p in store.parts(interview)}
+        if sorted(body.order) != sorted(parts):
+            raise HTTPException(422, "order must list every part exactly once")
+        store.set_parts(interview, [(parts[i]["path"], parts[i]["sha256"]) for i in body.order])
+        return {"ok": True}
+
+    @app.delete("/api/interviews/{interview}/parts/{idx}")
+    def delete_part(interview: str, idx: int) -> dict[str, bool]:
+        _interview_in_project(interview)
+        _not_busy(interview)
+        parts = store.parts(interview)
+        gone = next((p for p in parts if p["idx"] == idx), None)
+        if gone is None:
+            raise HTTPException(404, "unknown part")
+        store.set_parts(interview, [(p["path"], p["sha256"]) for p in parts if p is not gone])
+        _remove_upload(gone["path"])
+        return {"ok": True}
+
+    @app.post("/api/interviews/{interview}/transcribe")
+    def start_transcription(interview: str, body: TranscribeRequest) -> dict[str, int]:
+        _interview_in_project(interview)
+        _not_busy(interview)
+        if body.model not in ASR_MODELS:
+            raise HTTPException(422, "unknown model")
+        parts = store.parts(interview)
+        if not parts:
+            raise HTTPException(422, "Noch keine Aufnahme hochgeladen")
+        if not all(p["path"].is_file() for p in parts):
+            raise HTTPException(422, "Eine Aufnahme fehlt im Datenordner")
+        if (paths.exports / interview / f"{interview}.json").is_file():
+            has_markings = store.question_marks(interview) or store.links(interview)
+            if has_markings and not body.discard_markings:
+                raise HTTPException(409, "Neu transkribieren entfernt deine Markierungen")
+            store.delete_decisions(interview)
+        job_id = store.add_job("transcribe", interview, {"model": body.model})
         runner.notify()
-        return {"id": interview, "job": job_id}
+        return {"job": job_id}
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel_job(job_id: int) -> dict[str, bool]:
@@ -477,6 +591,8 @@ def create_app(paths: Paths, login_token: str, port: int,
         return {
             "id": interview,
             "project": store.project_of(interview),
+            "parts": [{"offset_s": p["offset_s"], "duration_s": p["duration_s"]}
+                      for p in t.parts],
             "speakers": t.speakers,
             "turns": [{"speaker": tu.speaker, "start": tu.start, "end": tu.end,
                        "words": [{"t": w.text, "s": w.start, "e": w.end, "p": round(w.prob, 2)}
@@ -488,10 +604,15 @@ def create_app(paths: Paths, login_token: str, port: int,
 
     @app.get("/api/interviews/{interview}/audio")
     def audio(interview: str) -> FileResponse:
-        path = store.audio_path(interview)
-        if path is None or not path.is_file():
+        return audio_part(interview, 0)
+
+    @app.get("/api/interviews/{interview}/audio/{part}")
+    def audio_part(interview: str, part: int) -> FileResponse:
+        """``part`` = position in playing order (0 = first recording)."""
+        paths_ = store.part_paths(interview)
+        if not 0 <= part < len(paths_) or not paths_[part].is_file():
             raise HTTPException(404, "no audio registered")
-        return FileResponse(path)
+        return FileResponse(paths_[part])
 
     @app.delete("/api/interviews/{interview}")
     def delete_interview(interview: str) -> dict[str, bool]:
@@ -504,22 +625,22 @@ def create_app(paths: Paths, login_token: str, port: int,
         if any(j["status"] in ("queued", "running") for j in store.jobs([interview])):
             raise HTTPException(409, "Erst den laufenden Auftrag abbrechen")
         exports = paths.exports / interview
-        audio = store.audio_path(interview)
-        uploaded = audio is not None and audio.parent == paths.audio and audio.is_file()
-        sha = None
+        parts = store.parts(interview)
+        shas = set()
         transcript = exports / f"{interview}.json"
         if transcript.is_file():
-            sha = json.loads(transcript.read_text(encoding="utf-8"))["meta"]["audio"]["sha256"]
-        elif uploaded:
-            sha = sha256_file(audio)
-        if sha:
+            shas.add(json.loads(transcript.read_text(encoding="utf-8"))["meta"]["audio"]["sha256"])
+        known = [p["sha256"] for p in parts if p["sha256"]]
+        if known:
+            shas.add(combined_sha(known))
+        for sha in shas:
             cache = paths.cache / sha[:16]
             if cache.parent == paths.cache and cache.is_dir():
                 shutil.rmtree(cache)
         if exports.is_dir() and exports.parent == paths.exports:
             shutil.rmtree(exports)
-        if uploaded:
-            audio.unlink()
+        for part in parts:
+            _remove_upload(part["path"])
         store.delete_interview(interview)
         return {"ok": True}
 
@@ -559,5 +680,6 @@ def create_app(paths: Paths, login_token: str, port: int,
         store.delete_link(link_id)
         return {"ok": True}
 
-    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    if (UI / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=UI / "assets"), name="assets")
     return app

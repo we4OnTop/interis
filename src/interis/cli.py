@@ -189,12 +189,13 @@ def cmd_serve(args: argparse.Namespace, paths: Paths) -> int:
 def cmd_set_audio(args: argparse.Namespace, paths: Paths) -> int:
     from interis.web.store import Store
 
-    audio = Path(args.audio).resolve()
-    if not audio.is_file():
-        print(f"ERROR: file not found: {audio}", file=sys.stderr)
-        return 2
-    Store(paths.root / "interis.db").register_interview(args.id, audio)
-    print(f"Audio for {args.id}: {audio}")
+    audio = [Path(a).resolve() for a in args.audio]
+    for a in audio:
+        if not a.is_file():
+            print(f"ERROR: file not found: {a}", file=sys.stderr)
+            return 2
+    Store(paths.root / "interis.db").register_parts(args.id, audio)
+    print(f"Audio for {args.id}: " + ", ".join(str(a) for a in audio))
     return 0
 
 
@@ -203,10 +204,11 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
     from interis.pipeline.asr import AsrOptions
     from interis.pipeline.run import PipelineOptions, run_pipeline
 
-    audio = Path(args.audio).resolve()
-    if not audio.is_file():
-        print(f"ERROR: file not found: {audio}", file=sys.stderr)
-        return 2
+    audio = [Path(a).resolve() for a in args.audio]
+    for a in audio:
+        if not a.is_file():
+            print(f"ERROR: file not found: {a}", file=sys.stderr)
+            return 2
     opts = PipelineOptions(
         asr_model=args.model,
         asr=AsrOptions(compute_type=args.compute_type, beam_size=args.beam_size,
@@ -231,7 +233,7 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
     _write_outputs(transcript, out_dir, args.formats)
     from interis.web.store import Store
 
-    Store(paths.root / "interis.db").register_interview(transcript.meta["interview_id"], audio)
+    Store(paths.root / "interis.db").register_parts(transcript.meta["interview_id"], audio)
     elapsed = time.monotonic() - started
     duration = transcript.meta["audio"]["duration_s"]
     print(f"{_summary(transcript)}")
@@ -262,7 +264,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("transcribe", help="transcribe one interview (offline)")
-    p.add_argument("audio", help="audio or video file")
+    p.add_argument("audio", nargs="+",
+                   help="audio or video file; several files (e.g. before and after a break) "
+                        "are joined in this order into one interview")
     p.add_argument("--id", help="interview pseudonym, e.g. I01 (default: derived from hash)")
     p.add_argument("--model", choices=ASR_MODELS, default="whisper-large-v3",
                    help="large-v3 = most precise (default), large-v3-turbo = faster draft")
@@ -294,7 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("set-audio", help="link an interview to its audio file (for playback)")
     p.add_argument("id", help="interview ID, e.g. I01")
-    p.add_argument("audio", help="audio file")
+    p.add_argument("audio", nargs="+", help="audio file(s) in playing order")
     p.set_defaults(func=cmd_set_audio)
 
     p = sub.add_parser("enroll", help="create your voice profile from a recording of only "

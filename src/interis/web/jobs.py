@@ -91,10 +91,11 @@ class JobRunner:
         guide = self.guide_file(iid)
         guide_args = ["--guide", str(guide)] if guide else []
         if job["kind"] == "transcribe":
-            audio = self.store.audio_path(iid)
-            if audio is None or not audio.is_file():
-                raise RuntimeError("Audiodatei nicht gefunden")
-            cmd = [*base, "transcribe", str(audio), "--id", iid, "--progress-json",
+            audio = self.store.part_paths(iid)
+            missing = [p.name for p in audio if not p.is_file()]
+            if not audio or missing:
+                raise RuntimeError("Audiodatei nicht gefunden: " + ", ".join(missing))
+            cmd = [*base, "transcribe", *map(str, audio), "--id", iid, "--progress-json",
                    "--model", job["options"].get("model", "whisper-large-v3"), *guide_args]
             if hotwords := self.hotwords(iid):
                 cmd += ["--hotwords", hotwords]

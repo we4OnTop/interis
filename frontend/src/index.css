@@ -1,0 +1,127 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* shadcn/ui theme (neutral) + Interis colours for questions, links and suggestions */
+:root {
+  --radius: 0.625rem;
+  --background: oklch(0.985 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+
+  --question: oklch(0.49 0.17 262);
+  --question-soft: oklch(0.95 0.03 262);
+  --linked: oklch(0.52 0.13 155);
+  --linked-soft: oklch(0.95 0.04 155);
+  --suggest: oklch(0.6 0.13 75);
+  --suggest-soft: oklch(0.96 0.05 90);
+  --interviewer: oklch(0.49 0.17 262);
+  --interviewee: oklch(0.3 0 0);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+
+  --question: oklch(0.72 0.14 262);
+  --question-soft: oklch(0.3 0.06 262);
+  --linked: oklch(0.72 0.13 155);
+  --linked-soft: oklch(0.3 0.05 155);
+  --suggest: oklch(0.8 0.13 85);
+  --suggest-soft: oklch(0.32 0.05 85);
+  --interviewer: oklch(0.72 0.14 262);
+  --interviewee: oklch(0.92 0 0);
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-question: var(--question);
+  --color-question-soft: var(--question-soft);
+  --color-linked: var(--linked);
+  --color-linked-soft: var(--linked-soft);
+  --color-suggest: var(--suggest);
+  --color-suggest-soft: var(--suggest-soft);
+  --color-interviewer: var(--interviewer);
+  --color-interviewee: var(--interviewee);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+}
+
+/* transcript: words are individually clickable, the playing turn is highlighted */
+.word-low {
+  text-decoration: underline dotted var(--suggest);
+  text-underline-offset: 3px;
+}
+.turn-playing {
+  background: var(--question-soft);
+}
+@keyframes flash {
+  from { background: var(--suggest-soft); }
+  to { background: transparent; }
+}
+.turn-flash {
+  animation: flash 2s ease-out;
+}

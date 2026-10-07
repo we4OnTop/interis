@@ -16,6 +16,14 @@ def params_key(params: dict[str, Any]) -> str:
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
+def combined_sha(part_shas: list[str]) -> str:
+    """One recording keeps its own hash (so existing caches stay valid); several parts
+    get a hash over the ordered part hashes."""
+    if len(part_shas) == 1:
+        return part_shas[0]
+    return hashlib.sha256(("parts:" + ",".join(part_shas)).encode()).hexdigest()
+
+
 class StepCache:
     def __init__(self, root: Path, audio_sha256: str) -> None:
         self.dir = root / audio_sha256[:16]

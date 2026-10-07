@@ -120,9 +120,12 @@ Alles läuft über die Website, die Kommandozeile ist nicht nötig:
    `.md`, `.txt`). Rechts siehst du sofort, welche Fragen erkannt wurden. „Jede Zeile als
    Frage“ macht aus einer einfachen Liste Leitfadenfragen. Optional ein Glossar mit Namen
    und Fachbegriffen eintragen.
-3. Aufnahme auswählen, Kürzel vergeben (z. B. `I01`), „Hochladen & transkribieren“. Die
-   Aufnahme wird als `audio\I01.<endung>` in den Datenordner kopiert; der Dateiname wird
-   nicht übernommen. Die Transkription läuft im Hintergrund, eine nach der anderen, mit
+3. „Gespräch hinzufügen“: Kürzel vergeben (z. B. `I01`) und die Aufnahme auswählen. Gab es
+   eine Pause, alle Aufnahmen des Gesprächs auswählen und in die richtige Reihenfolge
+   bringen: Sie werden als ein Gespräch transkribiert (gleiche Sprecherzuordnung über die
+   Pause hinweg), Zeiten erscheinen als „T2 · 03:15“ = Teil 2, Minute 3:15. Die Aufnahmen
+   werden als `audio\I01-1.<endung>`, `audio\I01-2.<endung>` … in den Datenordner kopiert;
+   Dateinamen werden nicht übernommen. Die Transkription läuft im Hintergrund, eine nach der anderen, mit
    Fortschrittsanzeige. Abbrechen und erneut starten sind möglich; bereits fertige
    Schritte bleiben zwischengespeichert.
 4. Wird der Leitfaden später geändert, werden die Interviews automatisch neu analysiert
@@ -132,8 +135,15 @@ Alles läuft über die Website, die Kommandozeile ist nicht nötig:
 hochgeladene Kopie. Die Originaldatei bleibt unberührt. Interviews, die über die
 Kommandozeile transkribiert wurden, landen im Projekt „Bestehende Interviews“.
 
-**Vergleich (Splitscreen):** eine Zeile pro Leitfadenfrage, eine Spalte pro Interview. Jede
-Zelle zeigt:
+**Ansichten:**
+- **Pro Frage** (zusammengefasst): links alle Leitfadenfragen mit farbigen Kästchen je
+  Gespräch (gestellt / anderswo beantwortet / weggelassen / fehlt), dazu eine Übersicht als
+  Tabelle. Eine Frage wählen → alle Antworten aller Gespräche untereinander. ← / → blättert.
+- **Nebeneinander** (getrennt): eine Zeile pro Leitfadenfrage, eine Spalte pro Gespräch.
+- **Transkript** eines Gesprächs, mit Klick auf ein Wort zum Anhören.
+
+Unten erscheint beim Abspielen ein Player (Leertaste = Pause, Alt+←/→ = 5 s). Jede Zelle
+bzw. Antwort zeigt:
 - wie und wann du die Frage gestellt hast;
 - die Antwort, einschließlich deiner Nachfragen;
 - Stellen, die die Frage *an anderer Stelle* beantworten (vorweg, später oder ohne Frage).
@@ -171,6 +181,15 @@ Laptop in den Ruhezustand gegangen ist) macht beim nächsten Start dort weiter. 
 langer Läufe den Laptop ans Netzteil hängen und den Ruhezustand deaktivieren.
 
 ## Entwicklung
+
+Oberfläche (`frontend/`, nur auf dem Entwicklungs-PC nötig, Node ≥ 22):
+
+```powershell
+cd frontend
+npm ci            # installiert exakt die Versionen aus package-lock.json, ohne Skripte
+npm run dev       # Entwicklungsserver auf :5173 (API von `interis serve` auf :8765)
+npm run build     # schreibt nach src/interis/web/dist (wird mit eingecheckt)
+```
 
 ```powershell
 uv run pytest                 # Tests

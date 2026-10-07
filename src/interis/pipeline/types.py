@@ -88,6 +88,20 @@ class Transcript:
             "analysis": self.analysis,
         }
 
+    @property
+    def parts(self) -> list[dict[str, Any]]:
+        """Recording parts with their offset on the joint timeline (one for most)."""
+        return self.meta.get("audio", {}).get("parts") or [
+            {"offset_s": 0.0, "duration_s": self.meta.get("audio", {}).get("duration_s", 0)}]
+
+    def part_at(self, t: float) -> tuple[int, float]:
+        """(part index, time within that recording) for a time on the joint timeline."""
+        index = 0
+        for i, p in enumerate(self.parts):
+            if p["offset_s"] <= t + 1e-6:
+                index = i
+        return index, max(0.0, t - self.parts[index]["offset_s"])
+
     @staticmethod
     def from_dict(d: dict[str, Any]) -> Transcript:
         turns = [

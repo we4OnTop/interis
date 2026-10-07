@@ -60,7 +60,10 @@ def assign_speakers(words: list[Word], diarization: Diarization) -> None:
             words[i].speaker = words[i + 1].speaker
 
 
-def build_turns(segments: list[Segment], diarization: Diarization | None) -> list[Turn]:
+def build_turns(segments: list[Segment], diarization: Diarization | None,
+                boundaries: list[float] | tuple[float, ...] = ()) -> list[Turn]:
+    """``boundaries``: start times of recording parts 2, 3, … – a turn never spans a
+    break between two recordings."""
     if diarization is None:
         # Without diarization each ASR segment becomes one turn with unknown speaker.
         return [Turn(None, s.start, s.end, list(s.words)) for s in segments if s.words]
@@ -69,7 +72,8 @@ def build_turns(segments: list[Segment], diarization: Diarization | None) -> lis
     assign_speakers(words, diarization)
     turns: list[Turn] = []
     for w in words:
-        if turns and turns[-1].speaker == w.speaker:
+        same_part = bool(turns) and not any(turns[-1].end <= b <= w.start for b in boundaries)
+        if turns and same_part and turns[-1].speaker == w.speaker:
             turns[-1].words.append(w)
             turns[-1].end = max(turns[-1].end, w.end)
         else:

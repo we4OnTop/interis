@@ -109,7 +109,8 @@ def interview_state(t: Transcript, marks: list[dict[str, Any]],
         for q in asked:
             i = questions.index(q)
             nxt = next((n for n in questions[i + 1:] if n.match == "main"), None)
-            end_turn = nxt.turn if nxt else len(t.turns)
+            # at least the question's own turn (next question may sit in the same turn)
+            end_turn = max(nxt.turn, q.turn + 1) if nxt else len(t.turns)
             exchanges.append({"question": asdict(q), "start": q.start,
                               "dialogue": _dialogue(t, q.turn, end_turn, questions)})
 

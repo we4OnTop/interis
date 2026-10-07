@@ -56,3 +56,25 @@ def test_without_diarization_each_segment_is_a_turn():
     s1, s2 = _seg([_w(" Hallo", 0, 1)]), _seg([_w(" Welt", 2, 3)])
     turns = build_turns([s1, s2], None)
     assert [(t.speaker, t.text) for t in turns] == [(None, "Hallo"), (None, "Welt")]
+
+
+def test_turn_is_split_at_a_break_between_recordings():
+    words = [_w(" vor", 0.0, 0.5), _w(" der", 0.6, 1.0), _w(" Pause", 12.5, 13.0)]
+    diar = Diarization(regular=[SpeakerSpan(0.0, 13.0, "A")],
+                       exclusive=[SpeakerSpan(0.0, 13.0, "A")])
+    assert len(build_turns([_seg(words)], diar)) == 1
+    turns = build_turns([_seg(words)], diar, boundaries=[12.0])
+    assert [t.text for t in turns] == ["vor der", "Pause"]
+
+
+def test_times_are_shown_per_recording_part():
+    from interis.export import stamp
+    from interis.pipeline.types import Transcript
+
+    t = Transcript(meta={"audio": {"duration_s": 72.0, "parts": [
+        {"offset_s": 0.0, "duration_s": 10.0}, {"offset_s": 12.0, "duration_s": 60.0}]}},
+        speakers=[], turns=[])
+    assert t.part_at(5.0) == (0, 5.0) and t.part_at(75.0) == (1, 63.0)
+    assert stamp(t, 75.0) == "Teil 2 00:01:03"
+    single = Transcript(meta={"audio": {"duration_s": 10.0}}, speakers=[], turns=[])
+    assert stamp(single, 75.0) == "00:01:15"

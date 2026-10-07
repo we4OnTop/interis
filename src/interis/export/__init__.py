@@ -19,6 +19,24 @@ def fmt_time(seconds: float) -> str:
     return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
 
 
+def stamp(transcript: Transcript, t: float) -> str:
+    """Time as heard in the recording; with several recordings prefixed by the part."""
+    if len(transcript.parts) < 2:
+        return fmt_time(t)
+    part, local = transcript.part_at(t)
+    return f"Teil {part + 1} {fmt_time(local)}"
+
+
+def _part_heading(transcript: Transcript, ti: int) -> str | None:
+    """'Teil 2' before the first turn of each recording part (if there are several)."""
+    if len(transcript.parts) < 2:
+        return None
+    part = transcript.part_at(transcript.turns[ti].start)[0]
+    if ti == 0 or transcript.part_at(transcript.turns[ti - 1].start)[0] != part:
+        return f"Teil {part + 1}"
+    return None
+
+
 def speaker_name(transcript: Transcript, label: str | None) -> str:
     if label is None:
         return "?"
@@ -61,8 +79,10 @@ def write_txt(transcript: Transcript, path: Path) -> None:
                 parts.append(f" {starts[wi]}")
             parts.append(w.text)
         text = "".join(parts).strip()
-        lines += [f"[{fmt_time(turn.start)}] {speaker_name(transcript, turn.speaker)}: {text}",
-                  ""]
+        if heading := _part_heading(transcript, ti):
+            lines += [f"--- {heading} ---", ""]
+        lines += [f"[{stamp(transcript, turn.start)}] "
+                  f"{speaker_name(transcript, turn.speaker)}: {text}", ""]
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -126,9 +146,12 @@ def write_docx(transcript: Transcript, path: Path) -> None:
 
     by_turn = _questions_by_turn(transcript)
     for ti, turn in enumerate(transcript.turns):
+        if heading := _part_heading(transcript, ti):
+            doc.add_heading(heading, level=3)
         p = doc.add_paragraph()
         p.paragraph_format.space_after = Pt(6)
-        head = p.add_run(f"[{fmt_time(turn.start)}] {speaker_name(transcript, turn.speaker)}: ")
+        head = p.add_run(f"[{stamp(transcript, turn.start)}] "
+                         f"{speaker_name(transcript, turn.speaker)}: ")
         head.bold = True
         spans = by_turn.get(ti, [])
         for wi, w in enumerate(turn.words):
@@ -158,9 +181,10 @@ def write_docx(transcript: Transcript, path: Path) -> None:
             cells = table.add_row().cells
             cells[0].text = row["code"]
             cells[1].text = row["text"]
-            cells[2].text = (", ".join(fmt_time(q["start"]) for q in row["asked"])
+            cells[2].text = (", ".join(stamp(transcript, q["start"]) for q in row["asked"])
                              or "nicht gestellt")
             cells[3].text = "; ".join(
-                f"{fmt_time(s['passages'][0]['start'])} ({_SUGGESTION_LABEL[s['type']]}, "
+                f"{stamp(transcript, s['passages'][0]['start'])} "
+                f"({_SUGGESTION_LABEL[s['type']]}, "
                 f"{s['score']:.2f})" for s in row["elsewhere"]) or "–"
     doc.save(str(path))

@@ -52,25 +52,36 @@ Removed on purpose: `whisperx` (torch 2.8 pin, runtime downloads), `nltk` (runti
 
 ## 4. Frontend (build time only; output is static files served by FastAPI)
 
-Kept deliberately small:
+Source in `frontend/` (React + TypeScript + shadcn/ui). `npm run build` writes plain files
+to `src/interis/web/dist/`, which is committed: the laptop never runs Node or npm.
 
-| Package | Purpose | License | Notes |
-|---|---|---|---|
-| react, react-dom | UI | MIT | Meta |
-| react-router | a few pages | MIT | Remix/Shopify |
-| @tanstack/react-query | API data/caching | MIT | |
-| wavesurfer.js | waveform + player | BSD-3 | No dependencies |
-| @mantine/core, @mantine/hooks | UI components | MIT | Few transitive deps (floating-ui, clsx…). Can be dropped for plain CSS if the tree grows. |
-| dev: vite, @vitejs/plugin-react, typescript, eslint + typescript-eslint, vitest | build/test | MIT | ⚠ Vite's *dev server* has had file-disclosure CVEs (2025). It is only used during development, on localhost, with real interview data never inside `web/`. |
+Runtime packages (bundled into the static JS):
 
-Package-manager hardening (`web/.npmrc` / `pnpm-workspace.yaml`):
-- **pnpm ≥ 10.** Dependency lifecycle scripts are off by default; any exception goes in
-  `onlyBuiltDependencies` (expected: none). This matters because the npm worms of 2025–26
-  (Shai-Hulud etc.) ran at install time.
-- `minimumReleaseAge: 10080` (7 days), so a freshly published malicious version is never
-  installed.
-- Committed `pnpm-lock.yaml`, `pnpm install --frozen-lockfile`, `pnpm audit` before updates.
-- No CDN, analytics or web fonts. Everything is bundled. Strict CSP: `default-src 'self'`.
+| Package | Purpose | License |
+|---|---|---|
+| react, react-dom 19.3 | UI | MIT (Meta) |
+| radix-ui 1.6 | accessible primitives behind shadcn (dialog, select, tabs, tooltip, checkbox, progress) | MIT (WorkOS) |
+| class-variance-authority, clsx, tailwind-merge | class name helpers used by shadcn | MIT/Apache-2.0 |
+| lucide-react | icons (only used ones are bundled) | ISC |
+
+Build-only: typescript 7, vite 8, @vitejs/plugin-react, tailwindcss 4 + @tailwindcss/vite,
+tw-animate-css, @types/*. The shadcn components are copied into `frontend/src/components/ui`
+by hand (that is how shadcn works); the `shadcn` CLI is not used, so it and its
+dependencies never run here.
+
+Deliberately not used: router, data-fetching, form, state-management and toast libraries,
+web fonts, CDNs.
+
+Hardening:
+- `frontend/.npmrc`: `ignore-scripts=true` (no install scripts — the npm worms of 2025/26
+  ran at install time), `save-exact=true`.
+- Versions were resolved with `npm install --before=<7 days ago>`; `package-lock.json` pins
+  every package with an integrity hash. Install with `npm ci`.
+- `npm audit`: 0 findings. One override: `source-map-js` 1.2.2 (fix for
+  GHSA-68fv-2mgg-jv7q, build-time only, same maintainer; released exactly 7 days before).
+- Strict CSP stays: `script-src 'self'`, `style-src 'self'`. Side effect: Radix's
+  scroll-lock style tag is blocked, so the page behind an open dialog can still scroll.
+  Accepted rather than allowing inline styles.
 
 ## 5. Models (downloaded once by `interis setup-models`, pinned + hashed)
 
