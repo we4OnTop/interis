@@ -1,5 +1,17 @@
 import { useEffect, useState } from "react";
-import { ColumnsIcon, CpuIcon, FileTextIcon, ListChecksIcon, LoaderIcon, LockIcon, MoonIcon, SettingsIcon, SunIcon } from "lucide-react";
+import {
+  ColumnsIcon,
+  CpuIcon,
+  FileTextIcon,
+  ListChecksIcon,
+  LoaderIcon,
+  LockIcon,
+  MoonIcon,
+  SettingsIcon,
+  SunIcon,
+  TableIcon,
+  WorkflowIcon,
+} from "lucide-react";
 
 import { PlayerBar } from "@/components/PlayerBar";
 import { Button } from "@/components/ui/button";
@@ -12,12 +24,14 @@ import { ProjectProvider, useProject } from "@/lib/project";
 import { href, navigate, useRoute, type Route } from "@/lib/router";
 import { cn } from "@/lib/utils";
 import { ColumnsPage } from "@/pages/ColumnsPage";
+import { ExtractPage } from "@/pages/ExtractPage";
 import { InterviewPage } from "@/pages/InterviewPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { QuestionsPage } from "@/pages/QuestionsPage";
 import { SetupPage } from "@/pages/SetupPage";
 import { SetupWizard } from "@/pages/SetupWizard";
 import { SystemPage } from "@/pages/SystemPage";
+import { WorkflowPage } from "@/pages/WorkflowPage";
 
 type Auth = "checking" | "ok" | "missing";
 
@@ -96,7 +110,9 @@ function ProjectArea({ route }: { route: Exclude<Route, { page: "projects" } | {
     <>
       <TopBar route={route} info={null} />
       {route.page === "questions" && <QuestionsPage code={route.code} />}
+      {route.page === "workflow" && <WorkflowPage />}
       {route.page === "columns" && <ColumnsPage />}
+      {route.page === "extract" && <ExtractPage />}
       {route.page === "setup" && <SetupPage tab={route.tab} />}
       {route.page === "interview" && <InterviewPage key={route.id} id={route.id} focusTurn={route.turn} />}
     </>
@@ -160,6 +176,7 @@ function ProjectNav({ route }: { route: Exclude<Route, { page: "projects" } | { 
         {detail!.project.name}
       </span>
       <nav className="ml-2 flex items-center gap-1">
+        {tab(route.page === "workflow", href.workflow(pid), <WorkflowIcon />, "Ablauf")}
         {tab(route.page === "questions", href.questions(pid), <ListChecksIcon />, "Pro Frage")}
         {tab(route.page === "columns", href.columns(pid), <ColumnsIcon />, "Nebeneinander")}
         {done.length > 0 && (
@@ -177,6 +194,7 @@ function ProjectNav({ route }: { route: Exclude<Route, { page: "projects" } | { 
             </SelectContent>
           </Select>
         )}
+        {tab(route.page === "extract", href.extract(pid), <TableIcon />, "Auswertung")}
         {tab(route.page === "setup", href.setup(pid), <SettingsIcon />, "Leitfaden & Gespräche")}
       </nav>
     </>

@@ -16,6 +16,7 @@ export function SettingsTab() {
   const p = detail!.project;
   const [name, setName] = useState(p.name);
   const [hotwords, setHotwords] = useState(p.hotwords);
+  const [tags, setTags] = useState(p.smoothing_tags ?? "");
 
   return (
     <Card className="max-w-3xl gap-4">
@@ -41,11 +42,25 @@ export function SettingsTab() {
             schreibt sie dann meist richtig. Gilt für Transkriptionen, die danach gestartet werden.
           </CardDescription>
         </div>
+        <div className="grid gap-2">
+          <Label htmlFor="ptags">Glättungs-Tags (eine Zeile pro Tag)</Label>
+          <Textarea
+            id="ptags"
+            value={tags}
+            onChange={(e) => setTags(e.target.value)}
+            maxLength={2000}
+            placeholder={detail!.tags.join("\n")}
+          />
+          <CardDescription>
+            Gründe für eine Glättung, z. B. Füllwort oder Satzabbruch. Jede Änderung im Modus „Glätten“ braucht einen dieser Gründe.
+            Leer lassen = Standardgründe (als Vorschlag angezeigt).
+          </CardDescription>
+        </div>
         <Button
-          disabled={!name.trim() || (name === p.name && hotwords === p.hotwords)}
+          disabled={!name.trim() || (name === p.name && hotwords === p.hotwords && tags === (p.smoothing_tags ?? ""))}
           onClick={async () => {
             try {
-              await api("PATCH", `/api/projects/${p.id}`, { name: name.trim(), hotwords });
+              await api("PATCH", `/api/projects/${p.id}`, { name: name.trim(), hotwords, smoothing_tags: tags });
               notify("Gespeichert");
               await reload();
             } catch (e) {
