@@ -77,3 +77,15 @@ def test_require_offline_refuses_without_bootstrap():
             print("REFUSED")
         """)
     assert r.stdout.strip() == "REFUSED"
+
+
+def test_proxy_settings_are_removed_so_the_hook_sees_real_destinations():
+    r = _run("""
+        import os
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:9"
+        from interis import _bootstrap
+        _bootstrap.go_offline()
+        print("GONE" if "HTTPS_PROXY" not in os.environ else "STILL SET")
+        print("SAVED" if _bootstrap.proxy_env_removed.get("HTTPS_PROXY") else "NOT SAVED")
+        """)
+    assert r.stdout.split() == ["GONE", "SAVED"], r.stdout + r.stderr

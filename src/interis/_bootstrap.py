@@ -50,9 +50,20 @@ def disable_telemetry() -> None:
     _state["telemetry_off"] = True
 
 
+# Proxy settings make libraries connect to the proxy instead of the real host. A proxy on
+# 127.0.0.1 would be "local" to the audit hook, which would then never see the destination.
+PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+              "http_proxy", "https_proxy", "all_proxy")
+# Removed proxy settings, kept so that the explicit model download can still use them.
+proxy_env_removed: dict[str, str] = {}
+
+
 def go_offline() -> None:
     disable_telemetry()
     os.environ.update(OFFLINE)
+    for key in PROXY_VARS:
+        if key in os.environ:
+            proxy_env_removed[key] = os.environ.pop(key)
     install_network_guard()
     _state["offline"] = True
 

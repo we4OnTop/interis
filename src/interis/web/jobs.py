@@ -22,7 +22,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from interis._bootstrap import OFFLINE
+from interis._bootstrap import OFFLINE, proxy_env_removed
 from interis.config import Paths
 from interis.web.store import Store
 
@@ -121,6 +121,7 @@ class JobRunner:
         if job["kind"] == "models":  # this process is offline; the download child is not
             for key in OFFLINE:
                 env.pop(key, None)
+            env.update(proxy_env_removed)  # the explicit download may need a proxy
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         tail: deque[str] = deque(maxlen=15)
         with self._lock:
