@@ -274,29 +274,163 @@ The scope is focused on what matters for the thesis:
    therefore left out);
 3. a side-by-side comparison of all interviews, synchronised per guide question.
 
-- **Frontend without npm:** plain HTML/CSS/JS in `src/interis/web/static/` (about 500
-  lines), served by FastAPI. This changes the earlier React/Vite plan. With zero
-  third-party frontend code there is no npm supply-chain risk and no Node toolchain.
-  Text is only inserted as text nodes, never as HTML.
-- **Backend:** FastAPI + uvicorn (Starlette 1.7). Decisions are stored in
-  `<data>/interis.db` (stdlib `sqlite3`): question corrections and manual marks
-  (`question_marks`), and "also answers" links with an `omitted` flag (`answer_links`).
-  Both are keyed by position (interview, turn, word range). Transcript JSONs stay untouched.
-- **Effective state** (`web/review.py`, pure functions) = machine analysis + your
-  decisions. Direct answers are recomputed after reassignments. Each link's type
-  (anticipated / later / unasked) is derived from when the question was actually asked.
-  Each cell status is one of asked / answered elsewhere / omitted / missing.
-- **Security as specified in §6:**
-  - bound to 127.0.0.1, Host allow-list;
-  - login token in the URL fragment, exchanged for an HttpOnly SameSite=Strict cookie;
-  - `X-Interis` header plus Origin check on writes;
-  - strict CSP, no API docs routes, input validation on every span and guide code.
-  - Tested in `tests/test_web.py`.
-- **Verified in a browser** with two German TTS interviews:
-  - the grid synchronises differently worded questions ("sensible Daten" → F3);
-  - linking via ↗ and via text selection works, "weggelassen – schon beantwortet" shows up;
-  - reassigning a follow-up to "F2 Nachfrage" works;
-  - audio streaming (HTTP 206) works.
+The frontend was rewritten from plain HTML/JS (the earlier `web/static/` plan no longer
+exists) to a React build. The 6c notes below describe the current state.
+
+- **Frontend:** React 19 with TypeScript, built with Vite 8 and styled with Tailwind CSS 4.
+  UI components are in `frontend/src/components/ui` (shadcn style on Radix primitives, icons
+  from lucide-react). Dependencies have exact versions in `frontend/package.json`. The build
+  (`npm run build`, i.e. `tsc -b && vite build`) writes to `src/interis/web/dist`
+  (`emptyOutDir: true`); the output is checked in. FastAPI serves `index.html` and `/assets`
+  (`web/base.py`, `secure_app`).
+- **Pages** (`frontend/src/pages/`): ProjectsPage; WorkflowPage ("Ablauf"); QuestionsPage
+  ("Pro Frage"); ColumnsPage ("Nebeneinander"); InterviewPage (transcript, modes "Lesen",
+  "Korrigieren", "Glätten"); ExtractPage ("Auswertung"); SetupPage ("Leitfaden & Gespräche",
+  tabs "Gespräche", "Leitfaden", "Einstellungen").
+- **Text rendering:** interview text is only passed to React as text nodes. No
+  `dangerouslySetInnerHTML` is used in `frontend/src`.
+- **Drag and drop** (`lib/review.tsx`, `ColumnsPage.tsx`): question chips and interviewee
+  turns are `draggable`. The payload is JSON under the type `application/x-interis` with
+  `kind` (question or answer), `interview`, `turn`, `first`, `last`. Dropping on a guide
+  question row posts to `/api/questions` (match "main") or `/api/links`; dropping on the
+  spontaneous row posts a follow-up question without a guide code. The payload names the
+  interview, so a drop cannot target another interview's column. Every drop also has a dialog
+  path; dragging is an accelerator only.
+- **Backend:** FastAPI and uvicorn. SQLite through the standard library `sqlite3`
+  (`web/store.py`, parameterised SQL) in `<data>/interis.db`. Manual question marks
+  (`question_marks`) and "also answers" links with an `omitted` flag (`answer_links`) are keyed
+  by position (interview, turn, word range). Transcript JSONs are not changed by the website.
+  Section 6d lists the tables added for the review steps.
+- **Effective state** (`web/review.py`, pure functions) = machine analysis + word edits +
+  your decisions. Direct answers are recomputed after reassignments. Each link's type
+  (anticipated / later / unasked) is derived from when the question was actually asked. Cell
+  status precedence in `interview_state`: asked > omitted > answered_elsewhere > explained >
+  missing.
+- **Security as built** (`web/base.py`, `cli.py`, `desktop.py`):
+  - the server listens on 127.0.0.1 (`cli.py`) and has a Host allow-list
+    (`TrustedHostMiddleware`);
+  - the login token is part of the URL fragment; `POST /api/login` exchanges it for an
+    HttpOnly, SameSite=Strict session cookie, and every `/api/` route requires that cookie;
+  - every non-GET request must send `X-Interis: 1`. If an `Origin` header is sent, it must be
+    the local origin. There is no CORS middleware;
+  - a Content-Security-Policy and the headers nosniff, no-referrer and frame-deny are set;
+    API docs routes are disabled;
+  - every write checks spans against the transcript and guide codes against the guide
+    (422 otherwise), and request fields have length limits (pydantic).
+- **Tests:** `tests/test_web.py`, `tests/test_workflow_api.py`, `tests/test_edits.py`,
+  `tests/test_web_dist.py` (referenced files of the built UI exist).
+- **Browser check of the earlier build:** two German TTS interviews were checked in a browser
+  for the side-by-side grid (differently worded questions are synchronised, e.g. "sensible
+  Daten" to F3), linking via the arrow button and via text selection, the "weggelassen -
+  schon beantwortet" status, reassigning a follow-up to "F2 Nachfrage", and audio streaming
+  (HTTP 206). The transcript edits, the workflow page, the decisions on missing questions, the
+  extracts and the exports are not covered by such a browser check in this document.
+
+## 6d. Transcript edits, workflow and extracts (as built)
+
+These are the review steps between transcription and export (the researcher's view is in
+docs/ABLAUF.md). Modules: `web/edits.py` (pure edit logic), `web/review.py` (effective state),
+`web/workflow.py` (steps and done rules), `web/extracts.py` (extract table and exports),
+`web/store.py` (SQLite), `web/app.py` (routes), `web/jobs.py` and `cli.py` (analysis with edits).
+
+### Edit overlay on the immutable transcript
+
+- The raw transcript JSON (`<data>/exports/<ID>/<ID>.json`) is not changed by the website.
+  Edits are rows in `word_edits`, keyed by (interview, turn, word).
+- `apply_edits(raw, edits)` returns an effective copy in memory. Word indices never move. A
+  deleted word keeps its timing and gets empty text. A replace span puts the new text into its
+  first word and deletes the other words of the span.
+- Question marks, answer links, decisions and extracts address words by position, so they stay
+  valid after edits. Passages are recomputed from the effective words (`review.passage`).
+- Views and exports use the effective text. In `GET /api/interviews/{id}` a changed word carries
+  `o` (original text), `k` (kind) and, for smoothing, `g` (tag).
+- A correction has no tag. A smoothing edit needs a tag from the project's effective tag list
+  (`project_tags(smoothing_tags)`; defaults in `DEFAULT_TAGS`). Replacement text is limited to
+  200 characters (`MAX_TEXT_LEN`), tags to 40 (`MAX_TAG_LEN`).
+
+### Analysis digest and re-analysis
+
+- `edits_digest(edits)` is a SHA-256 over the sorted edit rows. The analysis stores it as
+  `analysis["edits_digest"]`. `edits_stale` is true when the current digest differs
+  (`EMPTY_DIGEST` when there are no edits). The UI shows this as "Analyse veraltet".
+- Saving an edit does not queue an analysis. `POST /api/interviews/{id}/analyze` queues one
+  analysis job (same de-duplication as `_queue_analysis`).
+- For an analyze job with edits, `jobs.py` writes the rows to `<data>/tmp/edits-<job>.json`,
+  passes `--edits`, and removes the file in a `finally` block. `cmd_analyze` in `cli.py` runs the
+  analysis on `apply_edits(raw, edits)` and writes back only the analysis block plus the digest.
+  The raw words are unchanged.
+- Until the next analysis, the displayed text is current, but question detection, guide matches
+  and suggestions come from the last analysis.
+
+### Reviewed flag and re-transcription
+
+- "Korrektur abgeschlossen" is stored as `interviews.reviewed_at` (`PUT
+  /api/interviews/{id}/reviewed`). The flag does not check the text.
+- Starting a transcription for an interview that already has markings returns 409 unless
+  `discard_markings` is set. The discard path calls `store.delete_decisions`, which clears every
+  table in `DECISION_TABLES` and `reviewed_at`.
+- Edits are refused (409) while a transcription job of that interview is queued or running
+  (`_not_transcribing`).
+
+### Decisions on guide questions
+
+- `question_decisions` holds the reason (`not_asked`, `not_relevant`, `other`) and a note of up
+  to 2000 characters. `PUT /api/interviews/{id}/questions/{code}/decision` sets it; `reason: null`
+  deletes it. An unknown guide code returns 422.
+- In `interview_state` a cell gets status `explained` when there is neither an asked question
+  nor a confirmed link, but a decision exists.
+
+### Workflow state
+
+- `GET /api/projects/{pid}/workflow` returns the eight `steps` (`STEPS` in `web/workflow.py`,
+  with the German texts) and one row per interview.
+- Done rules (`interview_row`): transcribe = transcribed; correct = reviewed; smooth = at least
+  one smoothing edit (informational, never blocks); assign = transcribed and no question left
+  unmatched (computed by the server, but the "Ablauf" page shows counts instead of a check);
+  explain = transcribed and no guide question missing; extract = at least one extract.
+
+### Extracts and exports
+
+- Table `extracts` (id, interview, guide code, span, paraphrase, updated_at). The paraphrase is
+  required (non-empty, at most 2000 characters). The span is checked against the transcript.
+- `GET /api/projects/{pid}/extracts` returns the effective passage text and the start and end
+  times of the effective transcript.
+- `GET /api/projects/{pid}/extracts/export?format=docx|csv` builds the file in memory (python-docx
+  for DOCX, the `csv` module for CSV) and returns it with `Content-Disposition: attachment`.
+  Nothing is written to disk. Columns: Gespräch, Frage, Leitfadenfrage, Kernaussage, Zitat, Zeit.
+  CSV: UTF-8 with BOM, `;` as delimiter, CRLF line ends. In CSV, a cell starting with `=`, `+`,
+  `-`, `@`, tab or CR gets a leading apostrophe (`safe_cell`).
+
+### Tables and columns added
+
+| Name | Purpose |
+|---|---|
+| `word_edits` | one row per edited word: action (replace or delete), kind, text, tag |
+| `extracts` | a passage with the researcher's paraphrase, assigned to a guide question |
+| `question_decisions` | reason and note for a guide question without an answer |
+| `interviews.reviewed_at` | time of "Korrektur abgeschlossen"; NULL means open |
+| `projects.smoothing_tags` | newline-separated tags; empty means the defaults |
+
+### Endpoints added or changed
+
+All under `/api`. Every non-GET request needs the `X-Interis: 1` header and the session cookie.
+
+| Method and path | Purpose |
+|---|---|
+| `GET /api/interviews/{id}` | changed: effective text, `o`/`k`/`g` on changed words, `reviewed`, `edits_stale`, `decisions`, `edits` |
+| `GET /api/projects/{pid}/compare` | changed: cells use the effective text |
+| `PATCH /api/projects/{pid}` | accepts `smoothing_tags`; `GET /api/projects/{pid}` returns `tags` |
+| `POST /api/interviews/{id}/edits` | replace or delete a word span (correction or smoothing) |
+| `POST /api/interviews/{id}/edits/revert` | remove the edits in a span |
+| `PUT /api/interviews/{id}/reviewed` | set or clear "Korrektur abgeschlossen" |
+| `POST /api/interviews/{id}/analyze` | queue one analysis job |
+| `PUT /api/interviews/{id}/questions/{code}/decision` | set or delete the reason for a guide question |
+| `GET /api/projects/{pid}/workflow` | steps and progress per interview |
+| `GET /api/projects/{pid}/extracts` | extracts of the project |
+| `POST /api/extracts` | create an extract |
+| `PATCH /api/extracts/{id}` | change the paraphrase |
+| `DELETE /api/extracts/{id}` | delete an extract |
+| `GET /api/projects/{pid}/extracts/export?format=docx\|csv` | export file, generated in memory |
 
 ## 7. Repository layout
 

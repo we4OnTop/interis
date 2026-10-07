@@ -6,6 +6,8 @@ Interviews für die Masterarbeit (Deutsch, Interviewer + eine befragte Person).
 - [PLAN.md](PLAN.md): Ziele, Features, Phasen
 - [ARCHITECTURE.md](ARCHITECTURE.md): Architektur, Datenmodell, API, Sicherheitskonzept
 - [DEPENDENCIES.md](DEPENDENCIES.md): Abhängigkeiten, bekannte CVEs, Schutz vor Datenabfluss
+- [docs/ABLAUF.md](docs/ABLAUF.md): Ablauf der Auswertung, Schritt für Schritt
+- [docs/METHODEN.md](docs/METHODEN.md): methodische Grundlagen und offene Prüfpunkte
 
 **Wichtig:** Interviewdaten (Audio, Datenbank, Exporte, Modelle) gehören **nie** in dieses
 Repository. Sie liegen ausschließlich im verschlüsselten Datenverzeichnis. Die `.gitignore`
@@ -15,7 +17,19 @@ blockiert die üblichen Dateitypen zusätzlich.
 
 - Transkription (Whisper large-v3, Wort-Alignment, Sprechertrennung) → JSON/DOCX/TXT
 - Fragenerkennung, Leitfaden-Zuordnung, „an anderer Stelle beantwortet“
-- Website mit Splitscreen aller Interviews pro Leitfadenfrage
+- Website: Projekte, Splitscreen aller Gespräche pro Leitfadenfrage, Korrektur und Glättung
+  am Transkript (ohne das Original zu ändern), Begründung fehlender Fragen, Extraktion
+  mit Export als Word oder CSV
+
+## Ablauf
+
+Die Auswertung läuft in acht Schritten: Leitfaden festlegen, Transkribieren, Korrigieren,
+Glätten (optional), Fragen zuordnen, Fehlende Fragen klären, Extrahieren, Exportieren.
+Was du in Interis bei jedem Schritt tust und wann er erledigt ist, steht in
+[docs/ABLAUF.md](docs/ABLAUF.md). Die Seite **Ablauf** in der Oberfläche zeigt den Stand jedes
+Gesprächs. Die methodischen Grundlagen und die Punkte, die vor dem Zitieren zu prüfen sind,
+stehen in [docs/METHODEN.md](docs/METHODEN.md). Beide Dokumente sind keine Methodenbeschreibung
+für die Masterarbeit.
 
 ## Installation auf einem neuen PC (z. B. dem Laptop)
 
@@ -48,7 +62,7 @@ Voraussetzungen: [Git](https://git-scm.com), [uv](https://docs.astral.sh/uv/)
      gegen die Prüfsummen des offiziellen Repos.
 4. **Internet für Interis sperren** (PowerShell **als Administrator**, im Projektordner):
    ```powershell
-   .\scriptsirewall.ps1
+   .\scripts\firewall.ps1
    ```
 5. **Selbsttest:** `uv run interis doctor`
 
@@ -106,41 +120,61 @@ Ergebnis:
   Frage beantwortet wurden.
 - Alle Markierungen sind **Vorschläge** und werden von dir geprüft.
 
-## Website: alle Interviews nebeneinander
+## Website: Projekte, Gespräche, Auswertung
 
 ```powershell
 uv run interis serve            # öffnet den Browser; nur von diesem PC erreichbar
 ```
 
-**Projekte:** Ein Projekt besteht aus einem Interviewleitfaden und den Interviews dazu.
-Alles läuft über die Website, die Kommandozeile ist nicht nötig:
+Alles läuft über die Website, die Kommandozeile ist nicht nötig.
 
-1. „Neues Projekt“ anlegen.
-2. Unter **Leitfaden & Interviews** den Leitfaden eingeben oder als Datei laden (`.docx`,
-   `.md`, `.txt`). Rechts siehst du sofort, welche Fragen erkannt wurden. „Jede Zeile als
-   Frage“ macht aus einer einfachen Liste Leitfadenfragen. Optional ein Glossar mit Namen
-   und Fachbegriffen eintragen.
-3. „Gespräch hinzufügen“: Kürzel vergeben (z. B. `I01`) und die Aufnahme auswählen. Gab es
-   eine Pause, alle Aufnahmen des Gesprächs auswählen und in die richtige Reihenfolge
-   bringen: Sie werden als ein Gespräch transkribiert (gleiche Sprecherzuordnung über die
-   Pause hinweg), Zeiten erscheinen als „T2 · 03:15“ = Teil 2, Minute 3:15. Die Aufnahmen
-   werden als `audio\I01-1.<endung>`, `audio\I01-2.<endung>` … in den Datenordner kopiert;
-   Dateinamen werden nicht übernommen. Die Transkription läuft im Hintergrund, eine nach der anderen, mit
-   Fortschrittsanzeige. Abbrechen und erneut starten sind möglich; bereits fertige
-   Schritte bleiben zwischengespeichert.
-4. Wird der Leitfaden später geändert, werden die Interviews automatisch neu analysiert
-   (ohne neu zu transkribieren).
+**Projekte:** Ein Projekt besteht aus einem Interviewleitfaden und den Gesprächen dazu.
+Auf der Startseite mit „Neues Projekt“ anlegen. Im Projekt gibt es den Reiter
+**Leitfaden & Gespräche** mit drei Reitern:
 
-🗑 entfernt ein Interview wieder: Transkript, Zwischenergebnisse, Markierungen und die
-hochgeladene Kopie. Die Originaldatei bleibt unberührt. Interviews, die über die
-Kommandozeile transkribiert wurden, landen im Projekt „Bestehende Interviews“.
+1. **Gespräche:** „Gespräch hinzufügen“: Kürzel vergeben (z. B. `I01`) und die Aufnahme
+   auswählen. Gab es eine Pause, alle Aufnahmen des Gesprächs auswählen und in die richtige
+   Reihenfolge bringen: Sie werden als ein Gespräch transkribiert (gleiche Sprecherzuordnung
+   über die Pause hinweg), Zeiten erscheinen als „T2 · 03:15“ = Teil 2, Minute 3:15. Die
+   Aufnahmen werden als `audio\I01-1.<endung>`, `audio\I01-2.<endung>` … in den Datenordner
+   kopiert; Dateinamen werden nicht übernommen. „Transkription starten“ läuft im Hintergrund,
+   eine nach der anderen, mit Fortschrittsanzeige. Abbrechen und erneut starten sind möglich;
+   bereits fertige Schritte bleiben zwischengespeichert. Ein Gespräch lässt sich auch wieder
+   entfernen: dann werden Transkript, Zwischenergebnisse, Markierungen und die hochgeladene
+   Kopie gelöscht. Die Originaldatei bleibt unberührt.
+2. **Leitfaden:** Fragen eingeben oder als Datei laden (`.docx`, `.md`, `.txt`). Rechts siehst
+   du sofort, welche Fragen erkannt wurden. „Jede Zeile als Frage“ macht aus einer einfachen
+   Liste Leitfadenfragen. Wird der Leitfaden später geändert, werden die Gespräche automatisch
+   neu analysiert (ohne neu zu transkribieren).
+3. **Einstellungen:** Glossar (Namen, Fachbegriffe) und Glättungs-Tags, eine Zeile pro Tag.
+   Ohne eigene Tags gelten die Standardgründe.
 
-**Ansichten:**
+Interviews, die über die Kommandozeile transkribiert wurden, landen im Projekt „Bestehende
+Interviews“.
+
+**Ansichten** (in der oberen Leiste des Projekts):
+
+- **Ablauf:** die acht Schritte und der Stand jedes Gesprächs: Häkchen für erledigte Schritte,
+  „offen: F3, F5“ für fehlende Leitfadenfragen und „Analyse veraltet“, wenn Änderungen nach
+  der letzten Analyse gespeichert wurden.
 - **Pro Frage** (zusammengefasst): links alle Leitfadenfragen mit farbigen Kästchen je
-  Gespräch (gestellt / anderswo beantwortet / weggelassen / fehlt), dazu eine Übersicht als
-  Tabelle. Eine Frage wählen → alle Antworten aller Gespräche untereinander. ← / → blättert.
+  Gespräch (gestellt / anderswo beantwortet / weggelassen / nicht gestellt – begründet /
+  fehlt – begründen). Eine Frage wählen → alle Antworten aller Gespräche untereinander.
+  ← / → blättert.
 - **Nebeneinander** (getrennt): eine Zeile pro Leitfadenfrage, eine Spalte pro Gespräch.
-- **Transkript** eines Gesprächs, mit Klick auf ein Wort zum Anhören.
+  Hier ziehst du Fragen und Antworten per **Drag & Drop** auf die richtige Leitfadenfrage;
+  auf die Zeile „Fragen ohne Leitfaden-Zuordnung“ gezogene Fragen werden spontane
+  Nachfragen. Drag & Drop ist nur eine Abkürzung: jede Zuordnung geht auch über einen Dialog.
+- **Transkript** eines Gesprächs. Ein Klick auf ein Wort spielt die Aufnahme ab. Die Modi
+  oben im Transkript sind:
+  - **Lesen:** zum Anhören und Markieren;
+  - **Korrigieren:** falsch erkannte Wörter ersetzen;
+  - **Glätten:** Füllwörter, Wiederholungen und Abbrüche entfernen oder ersetzen, jeweils mit
+    Grund.
+  Mit „Änderungen anzeigen“ werden die Änderungen sichtbar, mit „Korrektur abgeschlossen“
+  hakst du die Korrektur ab.
+- **Auswertung:** alle Kernaussagen (Extrakte) je Leitfadenfrage und Gespräch. Hier exportierst
+  du die Tabelle mit „Als Word exportieren“ oder „Als CSV (Excel) exportieren“.
 
 Unten erscheint beim Abspielen ein Player (Leertaste = Pause, Alt+←/→ = 5 s). Jede Zelle
 bzw. Antwort zeigt:
@@ -148,18 +182,23 @@ bzw. Antwort zeigt:
 - die Antwort, einschließlich deiner Nachfragen;
 - Stellen, die die Frage *an anderer Stelle* beantworten (vorweg, später oder ohne Frage).
 
-Jede Stelle kannst du mit ▶ anhören.
+Jede Stelle kannst du anhören.
 
 | Was du tun willst | So geht's |
 |---|---|
-| Eine Antwort beantwortet auch eine andere Frage | im Vergleich ↗ neben der Antwort, **oder** im Transkript den Text markieren → „Antwort auf Frage …“. Optional „Frage deshalb weggelassen“ ankreuzen |
-| Frage falsch zugeordnet (anders formuliert) | auf das blaue Fragen-Kürzel klicken → richtige Leitfadenfrage wählen |
+| Eine Antwort beantwortet auch eine andere Frage | Im Vergleich den Redebeitrag auf die Leitfadenfrage ziehen, **oder** im Transkript den Text markieren → „Antwort auf Frage …“. Die Checkbox „Diese Frage habe ich deshalb weggelassen“ setzen, wenn die Frage deshalb nicht gestellt wurde |
+| Frage falsch zugeordnet | auf das Frage-Kürzel klicken → „Frage zuordnen“ → richtige Leitfadenfrage wählen |
 | Eine Frage wurde nicht erkannt | im Transkript markieren → „Als Frage markieren“ |
-| Etwas wurde fälschlich als Frage erkannt | Kürzel anklicken → „Ist keine Frage“ |
-| Automatischer Vorschlag | ✓ übernehmen oder ✕ verwerfen |
+| Etwas wurde fälschlich als Frage erkannt | Frage-Kürzel anklicken → „Ist keine Frage“ |
+| Leitfadenfrage ohne Antwort | „Begründen“ → Nicht gestellt / Nicht relevant für diese Person / Sonstiges, mit Notiz |
+| Automatischer Vorschlag | unter „Vorschläge – bitte prüfen“ übernehmen oder verwerfen |
+| Kernaussage festhalten | im Transkript markieren → „Als Extrakt übernehmen …“ |
+| Wort korrigieren | Modus „Korrigieren“, Wort anklicken oder Text markieren → „Ersetzen …“ |
+| Füllwort entfernen | Modus „Glätten“, markieren → „Entfernen“, Grund wählen; danach „Analyse aktualisieren“ |
 
 Deine Entscheidungen werden in `interis.db` im Datenordner gespeichert. Die Transkripte
-selbst bleiben unverändert. Fehlt die Audiodatei eines Interviews:
+selbst bleiben unverändert: Korrekturen, Glättungen und Begründungen liegen als eigene
+Einträge daneben. Fehlt die Audiodatei eines Interviews:
 `uv run interis set-audio I01 X:\interis-data\audio\interview01.m4a`.
 
 ## Stimmprofil (damit du sicher als „Interviewer“ erkannt wirst)
