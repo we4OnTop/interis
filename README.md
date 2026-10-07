@@ -13,40 +13,46 @@ blockiert die üblichen Dateitypen zusätzlich.
 
 ## Stand
 
-Phase 0 + 1: Kommandozeilen-Transkription (Whisper → Wort-Alignment → Sprechertrennung →
-JSON/DOCX/TXT). Die Website folgt in späteren Phasen.
+- Transkription (Whisper large-v3, Wort-Alignment, Sprechertrennung) → JSON/DOCX/TXT
+- Fragenerkennung, Leitfaden-Zuordnung, „an anderer Stelle beantwortet“
+- Website mit Splitscreen aller Interviews pro Leitfadenfrage
 
-## Einrichtung (einmalig)
+## Installation auf einem neuen PC (z. B. dem Laptop)
 
-Voraussetzungen: [uv](https://docs.astral.sh/uv/), [VeraCrypt](https://veracrypt.io).
+Voraussetzungen: [Git](https://git-scm.com), [uv](https://docs.astral.sh/uv/)
+(`winget install --id=astral-sh.uv -e`), [VeraCrypt](https://veracrypt.io).
 
 1. **Verschlüsselten Datenordner anlegen:** einen VeraCrypt-Container erstellen und
    einbinden, z. B. als Laufwerk `X:`. Darin den Ordner `X:\interis-data` anlegen. Er darf
    nicht auf dem Desktop, unter Dokumente oder in OneDrive liegen.
-2. **Umgebung installieren** (im Projektordner):
+2. **Code holen.** Das Repo ist privat; einmalig `gh auth login` oder ein Git-Login nötig:
    ```powershell
-   uv sync
-   $env:INTERIS_DATA_DIR = "X:\interis-data"
+   git clone https://github.com/we4OnTop/interis.git
+   cd interis
    ```
-3. **Zugang zum Sprechertrennungs-Modell:** Bei Hugging Face anmelden, die Bedingungen von
-   [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
-   akzeptieren und unter *Settings → Access Tokens* einen **Read**-Token erstellen.
-4. **Modelle laden.** Das ist der einzige Schritt mit Internetzugriff. Der Token wird nur
-   für diesen Download verwendet und nicht gespeichert:
+3. **Installieren** (normale PowerShell, im Projektordner):
    ```powershell
-   $env:HF_TOKEN = "hf_..."
-   uv run interis setup-models          # ggf. mit --use-system-certs (Virenscanner mit HTTPS-Scan)
-   Remove-Item Env:HF_TOKEN
+   .\scripts\install.ps1 -DataDir X:\interis-data
    ```
-   Danach den Token bei Hugging Face wieder löschen.
-5. **Internet für die Interis-Python sperren** (PowerShell **als Administrator**):
+   Das Skript installiert die festgelegte Umgebung, merkt sich den Datenordner, lädt und
+   prüft die Modelle (etwa 8 GB) und zeigt die nächsten Schritte. Hilfreiche Optionen:
+   - `-ModelsFrom E:\interis-models`: Modelle von einem USB-Stick übernehmen, statt sie
+     herunterzuladen. Kopiert wird der Ordner `models` eines anderen PCs; geprüft wird per
+     Prüfsumme.
+   - `-UseSystemCerts`: nötig, wenn ein Virenscanner HTTPS aufbricht (z. B. Kaspersky).
+   - Sprechertrennungs-Modell (pyannote): bevorzugt bei Hugging Face die Bedingungen von
+     [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
+     akzeptieren, einen **Read**-Token erstellen und vor dem Skript `$env:HF_TOKEN = "hf_..."`
+     setzen. Der Token wird nicht gespeichert; danach bei Hugging Face wieder löschen.
+     Alternativ `-AllowVerifiedMirror`: identische Dateien aus einem freien Spiegel, geprüft
+     gegen die Prüfsummen des offiziellen Repos.
+4. **Internet für Interis sperren** (PowerShell **als Administrator**, im Projektordner):
    ```powershell
-   .\scripts\firewall.ps1
+   .\scriptsirewall.ps1
    ```
-6. **Selbsttest:**
-   ```powershell
-   uv run interis doctor
-   ```
+5. **Selbsttest:** `uv run interis doctor`
+
+Updates später: `git pull`, dann `uv sync --locked`.
 
 ## Transkribieren
 
