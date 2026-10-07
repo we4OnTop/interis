@@ -1,0 +1,3 @@
+es soll auch möglich sein, das transskript zu bearbeiten, falls was falsch erkannt wurde. auch ein modus soll gegeben sein, wo man den transkribierten text glättet manuell und entsprechend makiert wo was entfernt und ersetzt wurde. dieser text wird dann in der zuordnung zu den fragenkatalog genommen auch mit der mögklichkeit einzuschalten ob man die editirerungen sehen soll. in der glättungsansicht soll es auch möglich sein, zu makieren warum ersetzt und das nach eigenen tags
+
+wichtig is das man bei der nebenansicht immernoch aus den antworten und fragen einer person per drag and drop wählen kann wo die zugordnet werden sollen zu definierten fragekatalog, falls nicht richtig erkannt.

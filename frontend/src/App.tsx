@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { ColumnsIcon, FileTextIcon, ListChecksIcon, LoaderIcon, LockIcon, MoonIcon, SettingsIcon, SunIcon } from "lucide-react";
+import { ColumnsIcon, CpuIcon, FileTextIcon, ListChecksIcon, LoaderIcon, LockIcon, MoonIcon, SettingsIcon, SunIcon } from "lucide-react";
 
 import { PlayerBar } from "@/components/PlayerBar";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { api, setUnauthorizedHandler } from "@/lib/api";
+import { api, setUnauthorizedHandler, type AppInfo } from "@/lib/api";
 import { FeedbackProvider } from "@/lib/feedback";
 import { PlayerProvider } from "@/lib/player";
 import { ProjectProvider, useProject } from "@/lib/project";
@@ -16,11 +16,14 @@ import { InterviewPage } from "@/pages/InterviewPage";
 import { ProjectsPage } from "@/pages/ProjectsPage";
 import { QuestionsPage } from "@/pages/QuestionsPage";
 import { SetupPage } from "@/pages/SetupPage";
+import { SetupWizard } from "@/pages/SetupWizard";
+import { SystemPage } from "@/pages/SystemPage";
 
 type Auth = "checking" | "ok" | "missing";
 
 export function App() {
   const [auth, setAuth] = useState<Auth>("checking");
+  const [info, setInfo] = useState<AppInfo | null>(null);
   const route = useRoute();
 
   useEffect(() => {
@@ -28,7 +31,11 @@ export function App() {
     // The login token arrives in the URL fragment (never sent to any server) and is
     // exchanged once for an HttpOnly session cookie.
     const m = location.hash.match(/login=([A-Za-z0-9_-]+)/);
-    const done = () => setAuth("ok");
+    const done = () =>
+      api<AppInfo>("GET", "/api/app").then((i) => {
+        setInfo(i);
+        setAuth("ok");
+      });
     if (m) {
       api("POST", "/api/login", { token: m[1] })
         .then(() => {
@@ -38,7 +45,7 @@ export function App() {
         })
         .catch(() => setAuth("missing"));
     } else {
-      api("GET", "/api/projects").then(done, () => setAuth("missing"));
+      done().catch(() => setAuth("missing"));
     }
   }, []);
 
@@ -50,10 +57,12 @@ export function App() {
             <LoaderIcon className="text-muted-foreground m-8 size-5 animate-spin" />
           ) : auth === "missing" ? (
             <NotLoggedIn />
-          ) : route.page === "projects" ? (
+          ) : info?.mode === "setup" ? (
+            <SetupWizard info={info} />
+          ) : route.page === "projects" || route.page === "system" ? (
             <>
-              <TopBar route={route} />
-              <ProjectsPage />
+              <TopBar route={route} info={info} />
+              {route.page === "projects" ? <ProjectsPage info={info} /> : <SystemPage />}
             </>
           ) : (
             <ProjectProvider pid={route.pid}>
@@ -79,13 +88,13 @@ function NotLoggedIn() {
   );
 }
 
-function ProjectArea({ route }: { route: Exclude<Route, { page: "projects" }> }) {
+function ProjectArea({ route }: { route: Exclude<Route, { page: "projects" } | { page: "system" }> }) {
   const { detail, error } = useProject();
   if (error && !detail) return <p className="text-destructive p-6">{error}</p>;
   if (!detail) return <LoaderIcon className="text-muted-foreground m-8 size-5 animate-spin" />;
   return (
     <>
-      <TopBar route={route} />
+      <TopBar route={route} info={null} />
       {route.page === "questions" && <QuestionsPage code={route.code} />}
       {route.page === "columns" && <ColumnsPage />}
       {route.page === "setup" && <SetupPage tab={route.tab} />}
@@ -103,7 +112,7 @@ function useDarkMode() {
   return [dark, setDark] as const;
 }
 
-function TopBar({ route }: { route: Route }) {
+function TopBar({ route, info }: { route: Route; info: AppInfo | null }) {
   const [dark, setDark] = useDarkMode();
   return (
     <header className="bg-background/95 sticky top-0 z-30 flex h-14 items-center gap-4 border-b px-4 backdrop-blur">
@@ -111,8 +120,15 @@ function TopBar({ route }: { route: Route }) {
         <span className="bg-primary text-primary-foreground grid size-7 place-items-center rounded-md text-sm">I</span>
         Interis
       </a>
-      {route.page !== "projects" && <ProjectNav route={route} />}
+      {route.page !== "projects" && route.page !== "system" && <ProjectNav route={route} />}
       <div className="ml-auto flex items-center gap-1">
+        <Button asChild variant={route.page === "system" ? "secondary" : "ghost"} size="sm" title="Modelle und Ordner">
+          <a href={href.system()} className="relative">
+            <CpuIcon />
+            System
+            {info?.models?.some((m) => m.status !== "ready") && <span className="bg-destructive absolute top-1 right-1 size-2 rounded-full" />}
+          </a>
+        </Button>
         <Button variant="ghost" size="icon-sm" onClick={() => setDark(!dark)} title={dark ? "Hell" : "Dunkel"}>
           {dark ? <SunIcon /> : <MoonIcon />}
         </Button>
@@ -121,7 +137,7 @@ function TopBar({ route }: { route: Route }) {
   );
 }
 
-function ProjectNav({ route }: { route: Exclude<Route, { page: "projects" }> }) {
+function ProjectNav({ route }: { route: Exclude<Route, { page: "projects" } | { page: "system" }> }) {
   const { detail } = useProject();
   const pid = detail!.project.id;
   const done = detail!.interviews.filter((iv) => iv.transcribed);

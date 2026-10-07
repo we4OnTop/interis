@@ -22,6 +22,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+from interis._bootstrap import OFFLINE
 from interis.config import Paths
 from interis.web.store import Store
 
@@ -88,6 +89,12 @@ class JobRunner:
     def command(self, job: dict) -> list[str]:
         iid = job["interview_id"]
         base = [sys.executable, "-m", "interis.cli", "--data-dir", str(self.paths.root)]
+        if self.paths.models_dir is not None:
+            base += ["--models-dir", str(self.paths.models_dir)]
+        if job["kind"] == "models":
+            # The only job that uses the network: download + verify the pinned models.
+            return [*base, "setup-models", "--use-system-certs", "--allow-verified-mirror",
+                    "--progress-json"]
         guide = self.guide_file(iid)
         guide_args = ["--guide", str(guide)] if guide else []
         if job["kind"] == "transcribe":
@@ -111,6 +118,9 @@ class JobRunner:
         self.store.update_job(job_id, status="running", stage="start", progress=0.0,
                               message="")
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+        if job["kind"] == "models":  # this process is offline; the download child is not
+            for key in OFFLINE:
+                env.pop(key, None)
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         tail: deque[str] = deque(maxlen=15)
         with self._lock:

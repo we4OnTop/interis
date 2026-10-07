@@ -1,15 +1,15 @@
 import { useEffect, useState } from "react";
-import { FolderOpenIcon, LoaderIcon, PlusIcon, ShieldCheckIcon } from "lucide-react";
+import { AlertTriangleIcon, FolderOpenIcon, LoaderIcon, PlusIcon, ShieldCheckIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { api, type ProjectSummary } from "@/lib/api";
+import { api, type AppInfo, type ProjectSummary } from "@/lib/api";
 import { useFeedback } from "@/lib/feedback";
 import { href, navigate } from "@/lib/router";
 
-export function ProjectsPage() {
+export function ProjectsPage({ info }: { info: AppInfo | null }) {
   const { fail } = useFeedback();
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [name, setName] = useState("");
@@ -48,6 +48,16 @@ export function ProjectsPage() {
           Ein Projekt = ein Interviewleitfaden und die Gespräche dazu. Alles bleibt auf diesem Rechner.
         </p>
       </div>
+
+      {info?.models?.some((m) => m.status !== "ready") && (
+        <a href={href.system()} className="border-suggest/50 bg-suggest-soft/50 flex items-center gap-3 rounded-lg border p-4 text-sm">
+          <AlertTriangleIcon className="text-suggest size-5 shrink-0" />
+          <span>
+            <span className="font-medium">Es fehlen noch Modelle.</span> Ohne sie kann nicht transkribiert werden – unter „System“
+            herunterladen oder einen Ordner mit vorhandenen Modellen verknüpfen.
+          </span>
+        </a>
+      )}
 
       {projects === null ? (
         <LoaderIcon className="text-muted-foreground size-5 animate-spin" />

@@ -266,3 +266,46 @@ export async function postFile<T>(path: string, file: Blob): Promise<T> {
 }
 
 export const enc = encodeURIComponent;
+
+export interface ModelState {
+  key: string;
+  label: string;
+  size: string;
+  repo: string;
+  license: string;
+  status: "ready" | "missing" | "outdated" | "incomplete";
+}
+
+export interface AppInfo {
+  mode: "main" | "setup";
+  portable: boolean;
+  desktop: boolean;
+  settings_file: string;
+  data_dir: string | null;
+  models_dir: string | null;
+  models_linked: boolean;
+  models: ModelState[] | null;
+  models_job: Job | null;
+  suggested_models_dir?: string | null;
+}
+
+export interface FolderCheck {
+  path: string;
+  exists: boolean;
+  warning: string | null;
+  has_interis?: boolean;
+  models?: ModelState[];
+  ready?: number;
+}
+
+declare global {
+  interface Window {
+    pywebview?: { api: { pick_folder: (start?: string) => Promise<string | null> } };
+  }
+}
+
+/** Native folder dialog in the desktop app (null in a normal browser). */
+export async function pickFolder(start?: string): Promise<string | null | undefined> {
+  if (!window.pywebview?.api) return undefined;
+  return window.pywebview.api.pick_folder(start ?? "");
+}

@@ -17,17 +17,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import secrets
 import shutil
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from interis.analysis.guide import (
     Guide,
@@ -41,16 +39,12 @@ from interis.config import Paths
 from interis.models import ASR_MODELS
 from interis.pipeline.cache import combined_sha
 from interis.pipeline.types import Transcript
+from interis.web.base import secure_app
 from interis.web.jobs import JobRunner, guide_path_for
 from interis.web.review import guide_mismatch, interview_state, interviewer_of
 from interis.web.store import Store
+from interis.web.system import add_system_routes
 
-UI = Path(__file__).parent / "dist"  # built from frontend/ (npm run build)
-SESSION_COOKIE = "interis_session"
-CSRF_HEADER = "x-interis"
-CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-       "media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; "
-       "frame-ancestors 'none'; form-action 'none'")
 INTERVIEW_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 AUDIO_EXT = {"m4a", "mp3", "wav", "aac", "flac", "ogg", "opus", "wma", "webm", "mp4", "mov",
              "mkv", "avi", "3gp", "amr"}
@@ -58,10 +52,6 @@ MAX_AUDIO_BYTES = 8 * 1024**3
 MAX_DOCX_BYTES = 20 * 1024**2
 MAX_GUIDE_CHARS = 200_000
 LEGACY_PROJECT = "Bestehende Interviews"
-
-
-class Login(BaseModel):
-    token: str = Field(max_length=200)
 
 
 class Span(BaseModel):
@@ -201,8 +191,11 @@ class _Data:
 
 
 def create_app(paths: Paths, login_token: str, port: int,
-               guide_path: Path | None = None) -> FastAPI:
-    """``guide_path``: guide for interviews from before projects existed."""
+               guide_path: Path | None = None,
+               on_restart: Callable[[], None] | None = None) -> FastAPI:
+    """``guide_path``: guide for interviews from before projects existed.
+    ``on_restart``: provided by the desktop app, which can restart the server (e.g. after
+    the data or models folder was changed)."""
     store = Store(paths.root / "interis.db")
     data = _Data(paths, store, guide_path)
     data.adopt_unassigned()
@@ -218,8 +211,6 @@ def create_app(paths: Paths, login_token: str, port: int,
         return project["hotwords"].strip() if project else ""
 
     runner = JobRunner(paths, store, job_guide, job_hotwords)
-    session_value = secrets.token_urlsafe(32)
-    allowed_origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -227,35 +218,9 @@ def create_app(paths: Paths, login_token: str, port: int,
         yield
         runner.stop()
 
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app = secure_app(login_token, port, lifespan)
     app.state.runner = runner
-
-    @app.middleware("http")
-    async def security(request: Request, call_next):
-        path = request.url.path
-        if request.method not in ("GET", "HEAD"):
-            origin = request.headers.get("origin")
-            if origin is not None and origin not in allowed_origins:
-                return JSONResponse({"detail": "bad origin"}, status_code=403)
-            if request.headers.get(CSRF_HEADER) != "1":
-                return JSONResponse({"detail": "missing header"}, status_code=403)
-        if path.startswith("/api/") and path != "/api/login":
-            cookie = request.cookies.get(SESSION_COOKIE, "")
-            if not secrets.compare_digest(cookie, session_value):
-                return JSONResponse({"detail": "not logged in"}, status_code=401)
-        response: Response = await call_next(request)
-        response.headers["Content-Security-Policy"] = CSP
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["X-Frame-Options"] = "DENY"
-        if path.startswith("/api/"):
-            response.headers["Cache-Control"] = "no-store"
-        else:  # always revalidate the UI files, so updates are picked up on reload
-            response.headers["Cache-Control"] = "no-cache"
-        return response
-
-    # Added last = outermost: reject foreign Host headers before anything else runs.
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+    add_system_routes(app, paths, store, runner, on_restart)
 
     # ------------------------------------------------------------------ helpers
     def _transcript(interview: str) -> Transcript:
@@ -345,23 +310,6 @@ def create_app(paths: Paths, login_token: str, port: int,
             raise HTTPException(422, "unknown guide code")
 
     # ------------------------------------------------------------------ routes
-    @app.get("/")
-    def index() -> FileResponse:
-        index = UI / "index.html"
-        if not index.is_file():
-            return PlainTextResponse("Oberfläche nicht gebaut: im Ordner frontend `npm ci` und "
-                                     "`npm run build` ausführen.", status_code=500)
-        return FileResponse(index)
-
-    @app.post("/api/login")
-    def login(body: Login) -> Response:
-        if not secrets.compare_digest(body.token, login_token):
-            raise HTTPException(401, "invalid token")
-        response = JSONResponse({"ok": True})
-        response.set_cookie(SESSION_COOKIE, session_value, httponly=True, samesite="strict",
-                            path="/")
-        return response
-
     # ---------------------------------------------------------------- projects
     @app.get("/api/projects")
     def projects() -> list[dict[str, Any]]:
@@ -680,6 +628,4 @@ def create_app(paths: Paths, login_token: str, port: int,
         store.delete_link(link_id)
         return {"ok": True}
 
-    if (UI / "assets").is_dir():
-        app.mount("/assets", StaticFiles(directory=UI / "assets"), name="assets")
     return app

@@ -165,6 +165,19 @@ def verify_ready(paths: Paths, key: str) -> Path:
     return target
 
 
+def quick_status(paths: Paths, key: str) -> str:
+    """'ready' | 'missing' | 'outdated' | 'incomplete' – without hashing (fast, for the UI).
+    The full hash check still runs before every use (verify_ready)."""
+    entry = read_lock(paths).get(key)
+    target = ready_dir(paths, key)
+    if not entry or not target.is_dir():
+        return "missing"
+    if entry.get("revision") != MODELS[key].revision:
+        return "outdated"
+    present = {p.relative_to(target).as_posix() for p in target.rglob("*") if p.is_file()}
+    return "ready" if present == set(entry["files"]) else "incomplete"
+
+
 def is_ready(paths: Paths, key: str) -> bool:
     try:
         verify_ready(paths, key)

@@ -1,0 +1,36 @@
+Interis – Interviews transkribieren und vergleichen (lokal, offline)
+====================================================================
+
+Starten
+-------
+Doppelklick auf Interis.exe. Keine Installation nötig; der Ordner kann auf einem
+anderen Laufwerk oder USB-Stick liegen und darf verschoben werden.
+
+Beim ersten Start fragt Interis nach zwei Ordnern:
+
+  1. Datenordner – Aufnahmen, Transkripte, Markierungen.
+     Am besten auf einem verschlüsselten VeraCrypt-Laufwerk. Nicht in OneDrive.
+
+  2. Modelle (ca. 8 GB, keine persönlichen Daten):
+     - "Vorhandene Modelle verwenden": Ordner mit Modellen von einem anderen PC oder
+       USB-Stick wählen. Er wird nur verknüpft, nicht kopiert.
+     - "Modelle herunterladen": Zielordner frei wählen; der Download läuft danach auf
+       der Seite "System" (einmalig Internet nötig, 15–60 Minuten).
+
+Die Auswahl steht in interis.json in diesem Ordner und ist unter "System" änderbar.
+Liegen Daten oder Modelle auf demselben Laufwerk wie dieser Ordner, werden sie relativ
+gespeichert – ein USB-Stick funktioniert also auch mit anderem Laufwerksbuchstaben.
+
+Internet sperren (empfohlen)
+----------------------------
+Interis blockiert Netzwerkverbindungen bereits selbst. Zusätzlich kann die
+Windows-Firewall Interis sperren: nach dem Modell-Download Rechtsklick auf
+Internet-sperren.ps1 → "Mit PowerShell ausführen". Nach dem Verschieben des Ordners
+erneut ausführen.
+
+Hinweis
+-------
+Windows zeigt beim ersten Start evtl. "Unbekannter Herausgeber" (die exe ist nicht
+signiert): "Weitere Informationen" → "Trotzdem ausführen".
+Protokoll bei Problemen: interis-desktop.log in diesem Ordner (enthält nur Ordnerpfade
+und Fehlermeldungen, keine Interviewinhalte).

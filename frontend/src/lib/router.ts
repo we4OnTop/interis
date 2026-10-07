@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 //   #/p/<pid>/i/<id>?t=<turn>  transcript
 export type Route =
   | { page: "projects" }
+  | { page: "system" }
   | { page: "questions"; pid: number; code: string | null }
   | { page: "columns"; pid: number }
   | { page: "setup"; pid: number; tab: string | null }
@@ -17,6 +18,7 @@ export function parseRoute(hash: string): Route {
   const [path, query] = hash.replace(/^#/, "").split("?");
   const params = new URLSearchParams(query || "");
   const parts = (path || "/").split("/").filter(Boolean);
+  if (parts[0] === "system") return { page: "system" };
   if (parts[0] !== "p" || !parts[1] || Number.isNaN(Number(parts[1]))) return { page: "projects" };
   const pid = Number(parts[1]);
   if (parts[2] === "columns") return { page: "columns", pid };
@@ -30,6 +32,7 @@ export function parseRoute(hash: string): Route {
 
 export const href = {
   projects: () => "#/",
+  system: () => "#/system",
   questions: (pid: number, code?: string | null) => `#/p/${pid}${code ? `?q=${encodeURIComponent(code)}` : ""}`,
   columns: (pid: number) => `#/p/${pid}/columns`,
   setup: (pid: number, tab?: string) => `#/p/${pid}/setup${tab ? `?tab=${tab}` : ""}`,

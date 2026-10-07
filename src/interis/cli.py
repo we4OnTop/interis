@@ -50,15 +50,9 @@ def cmd_setup_models(args: argparse.Namespace, paths: Paths) -> int:
 
     keys = args.only or list(MODELS)
     token = os.environ.get("HF_TOKEN") or None
-    if args.use_system_certs:
-        # Needed when local software (e.g. an antivirus "HTTPS scan") re-signs TLS traffic
-        # with its own root certificate that only the Windows certificate store trusts.
-        # TLS stays verified – just against the OS store instead of certifi's bundle.
-        import truststore
-
-        truststore.inject_into_ssl()
-        print("Using the Windows certificate store for TLS verification.")
-    for key in keys:
+    for i, key in enumerate(keys):
+        if args.progress_json:
+            print(json.dumps({"stage": f"models:{key}", "fraction": i / len(keys)}), flush=True)
         try:
             # The token is only sent for gated models.
             setup_model(paths, key, token if MODELS[key].gated else None,
@@ -66,6 +60,8 @@ def cmd_setup_models(args: argparse.Namespace, paths: Paths) -> int:
         except ModelError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
+    if args.progress_json:
+        print(json.dumps({"stage": "models:done", "fraction": 1.0}), flush=True)
     print("\nDone. Next: run scripts\\firewall.ps1 as administrator, then `interis doctor`.")
     return 0
 
@@ -247,6 +243,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(prog="interis", description=__doc__)
     parser.add_argument("--data-dir", help="data directory (default: $INTERIS_DATA_DIR)")
+    parser.add_argument("--models-dir",
+                        help="models directory (default: $INTERIS_MODELS_DIR or <data>/models)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("setup-models", help="one-time download + verification of models "
@@ -258,6 +256,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-verified-mirror", action="store_true",
                    help="without HF_TOKEN: fetch gated models from their ungated mirror; "
                         "files are verified against the official repo's hashes")
+    p.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_setup_models)
 
     p = sub.add_parser("doctor", help="check privacy and integrity guarantees")
@@ -335,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         _bootstrap.go_offline()
     try:
-        paths = resolve_paths(args.data_dir)
+        paths = resolve_paths(args.data_dir, args.models_dir)
     except ConfigError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
