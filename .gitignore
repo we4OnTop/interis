@@ -63,3 +63,6 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+
+# Tool artifacts
+.serena/
