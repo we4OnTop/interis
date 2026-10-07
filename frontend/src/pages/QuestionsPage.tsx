@@ -49,7 +49,7 @@ export function QuestionsPage({ code }: { code: string | null }) {
       <div className="flex h-[calc(100vh-3.5rem)]">
         <QuestionNav data={data} ids={ids} code={code} pid={pid} />
         <main className="min-w-0 flex-1 overflow-y-auto pb-24">
-          <div className="bg-background/95 sticky top-0 z-10 border-b px-6 py-3 backdrop-blur">
+          <div className="bg-background/95 sticky top-0 z-10 border-b px-4 sm:px-6 py-3 backdrop-blur">
             <InterviewFilter
               ids={data.interviews}
               hidden={hidden}
@@ -58,7 +58,7 @@ export function QuestionsPage({ code }: { code: string | null }) {
               setShowSuggestions={setShowSuggestions}
             />
           </div>
-          <div className="space-y-5 px-6 py-5">
+          <div className="space-y-5 px-4 sm:px-6 py-5">
             {selected ? (
               <QuestionDetail
                 q={selected}

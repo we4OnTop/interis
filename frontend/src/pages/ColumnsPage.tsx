@@ -82,7 +82,7 @@ export function ColumnsPage() {
   if (!data) return <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
   if (!data.guide || !data.interviews.length)
     return (
-      <p className="text-muted-foreground p-6 text-sm">
+      <p className="text-muted-foreground p-4 sm:p-6 text-sm">
         Noch nichts zu vergleichen. <a className="underline" href={href.setup(pid)}>Leitfaden & Gespräche einrichten</a>
       </p>
     );
@@ -93,10 +93,10 @@ export function ColumnsPage() {
   return (
     <ReviewProvider guide={data.guide} onChanged={reload}>
       <div className="flex h-[calc(100vh-3.5rem)] flex-col">
-        <div className="border-b px-6 py-3">
+        <div className="border-b px-4 sm:px-6 py-3">
           <InterviewFilter ids={data.interviews} hidden={hidden} toggle={toggle} showSuggestions={showSuggestions} setShowSuggestions={setShowSuggestions} />
         </div>
-        <div className="min-h-0 flex-1 overflow-auto px-6 pt-4 pb-24">
+        <div className="min-h-0 flex-1 overflow-auto px-4 sm:px-6 pt-4 pb-24">
           <div
             className="bg-card grid w-max min-w-full rounded-lg border text-sm"
             style={{ gridTemplateColumns: `minmax(220px, 280px) repeat(${ids.length}, minmax(340px, 440px))` }}

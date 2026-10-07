@@ -42,13 +42,13 @@ export function ExtractPage() {
   if (!rows) return <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
   if (!questions.length)
     return (
-      <p className="text-muted-foreground p-6 text-sm">
+      <p className="text-muted-foreground p-4 sm:p-6 text-sm">
         Noch kein Leitfaden. <a className="underline" href={href.setup(pid)}>Leitfaden & Gespräche einrichten</a>
       </p>
     );
 
   return (
-    <div className="mx-auto max-w-[120rem] space-y-4 p-6">
+    <div className="mx-auto max-w-[120rem] space-y-4 p-4 sm:p-6">
       <div className="flex flex-wrap items-center gap-3">
         <div className="mr-auto">
           <h1 className="text-lg font-semibold">Auswertung</h1>

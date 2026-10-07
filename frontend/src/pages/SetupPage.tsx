@@ -13,7 +13,7 @@ export function SetupPage({ tab }: { tab: string | null }) {
   const pid = detail!.project.id;
   const current = tab ?? (detail!.guide ? "interviews" : "guide");
   return (
-    <div className="mx-auto max-w-6xl p-6">
+    <div className="mx-auto max-w-6xl p-4 sm:p-6">
       <Tabs value={current} onValueChange={(t) => navigate(href.setup(pid, t), true)} className="gap-5">
         <TabsList>
           <TabsTrigger value="interviews">

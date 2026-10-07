@@ -235,7 +235,7 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
   const multi = d.parts.length > 1;
 
   return (
-    <div className="mx-auto flex max-w-7xl gap-6 p-6 pb-28">
+    <div className="mx-auto flex max-w-7xl gap-6 p-4 sm:p-6 pb-28">
       <div className="min-w-0 flex-1 space-y-4">
         <div className="flex flex-wrap items-baseline gap-3">
           <h1 className="font-mono text-2xl font-semibold">{d.id}</h1>

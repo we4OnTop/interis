@@ -188,10 +188,15 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
 - **Session token:** the launcher generates a random token at start and opens
   `http://127.0.0.1:8765/#login=<token>`. The page exchanges it for an
   `HttpOnly; SameSite=Strict` cookie. Every API call requires the cookie.
-- Origin/Referer check on all state-changing requests. No CORS middleware at all.
-- Security headers: `Content-Security-Policy: default-src 'self'; media-src 'self' blob:;
-  object-src 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`,
-  `Referrer-Policy: no-referrer`. The frontend loads **no** CDN scripts or web fonts.
+- State-changing requests must send `X-Interis: 1`; an `Origin` header, when present, must be the local origin. There is no Referer check and no CORS middleware.
+- Security headers: `Content-Security-Policy` as built in `web/base.py`: scripts only from
+  the app's own files (`script-src 'self'`); styles from the app, a fresh per-response nonce
+  (`'nonce-…'`, also written into the page's `csp-nonce` meta tag, which the UI library reads),
+  and one hash for the scrollbar style of the Radix select; no `unsafe-inline`; images from the
+  app or `data:` URIs (the favicon); `object-src 'none'`, `frame-ancestors 'none'`,
+  `form-action 'none'`. Also `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`
+  and `X-Frame-Options: DENY`. The frontend loads **no** CDN scripts or web fonts.
+  `tests/test_csp.py` pins the nonce behaviour.
 - Uploads: streamed, size cap, magic-byte sniffing, stored under a UUID name (the user's
   filename is never used as a path).
 - Interview text is rendered as text, never as HTML (no `dangerouslySetInnerHTML`).

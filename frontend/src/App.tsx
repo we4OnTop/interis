@@ -131,7 +131,7 @@ function useDarkMode() {
 function TopBar({ route, info }: { route: Route; info: AppInfo | null }) {
   const [dark, setDark] = useDarkMode();
   return (
-    <header className="bg-background/95 sticky top-0 z-30 flex h-14 items-center gap-4 border-b px-4 backdrop-blur">
+    <header className="bg-background/95 sticky top-0 z-30 flex min-h-14 flex-wrap items-center gap-x-4 gap-y-1 border-b px-4 py-1 backdrop-blur">
       <a href={href.projects()} className="flex items-center gap-2 font-semibold tracking-tight">
         <span className="bg-primary text-primary-foreground grid size-7 place-items-center rounded-md text-sm">I</span>
         Interis
@@ -175,7 +175,7 @@ function ProjectNav({ route }: { route: Exclude<Route, { page: "projects" } | { 
       <span className="max-w-56 truncate text-sm font-medium" title={detail!.project.name}>
         {detail!.project.name}
       </span>
-      <nav className="ml-2 flex items-center gap-1">
+      <nav className="ml-2 flex flex-wrap items-center gap-1">
         {tab(route.page === "workflow", href.workflow(pid), <WorkflowIcon />, "Ablauf")}
         {tab(route.page === "questions", href.questions(pid), <ListChecksIcon />, "Pro Frage")}
         {tab(route.page === "columns", href.columns(pid), <ColumnsIcon />, "Nebeneinander")}
