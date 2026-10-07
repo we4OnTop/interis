@@ -1,8 +1,8 @@
 # Interis – Dependency & Security Review
 
 Status: researched 2026-10-06. Version floors are **minimums that exclude known CVEs as of
-this date**. The exact versions come from `uv.lock` / `pnpm-lock.yaml` and are re-checked with
-`pip-audit`, `osv-scanner` and `pnpm audit` before every update.
+this date**. The exact versions come from `uv.lock` / `frontend/package-lock.json` and are re-checked
+with `pip-audit`, `osv-scanner` and `npm audit` before every update.
 
 Legend: 🌐 = can make network calls → how it is neutralised · ⚠ = known issue/CVE → mitigation
 
@@ -79,9 +79,10 @@ Hardening:
   every package with an integrity hash. Install with `npm ci`.
 - `npm audit`: 0 findings. One override: `source-map-js` 1.2.2 (fix for
   GHSA-68fv-2mgg-jv7q, build-time only, same maintainer; released exactly 7 days before).
-- Strict CSP stays: `script-src 'self'`, `style-src 'self'`. Side effect: Radix's
-  scroll-lock style tag is blocked, so the page behind an open dialog can still scroll.
-  Accepted rather than allowing inline styles.
+- Strict CSP stays: `script-src 'self'`, no `unsafe-inline`. The UI library's scroll-lock
+  style tag gets a per-response nonce (see `web/base.py` and `tests/test_csp.py`); Radix
+  Select's one fixed style tag is allowed by its hash. If a Radix upgrade changes that text,
+  the scrollbar styling of the select is lost, and the hash in `web/base.py` must be updated.
 
 ## 5. Models (downloaded once by `interis setup-models`, pinned + hashed)
 
@@ -134,7 +135,7 @@ download. Interview data never goes over the network.
 | Python 3.11, **uv-managed** (`python-preference = "only-managed"`) | runtime | Not the Microsoft Store Python. A Windows venv's `python.exe` is only a launcher, so the firewall rule must target the *base* interpreter. A dedicated uv-managed interpreter keeps that rule specific. |
 | **truststore** | OS certificate store for the setup download | Opt-in via `--use-system-certs`. Same library pip vendors. |
 | **uv** (Astral) | env + lockfile | `[tool.uv] exclude-newer = "7 days"` (dependency cooldown), `uv sync --locked`. |
-| Node.js LTS + pnpm | frontend build only | Not needed at runtime. |
+| Node.js LTS + npm | frontend build only | Not needed at runtime. |
 | **VeraCrypt** | encrypted data container | Open source, independently audited (Quarkslab 2016, Fraunhofer SIT for BSI 2020). |
 | Windows Defender Firewall | outbound block for the venv python | Created by `scripts/firewall.ps1`, checked by `interis doctor`. |
 
@@ -147,7 +148,7 @@ download. Interview data never goes over the network.
 - [ ] Data dir is on the VeraCrypt volume and **not** under a OneDrive-synced folder
 - [ ] Server listens on 127.0.0.1 only; a Host-header test with `evil.example` is rejected
 - [ ] `models.lock.json` hashes match
-- [ ] `pip-audit` / `pnpm audit` clean (or accepted findings documented). pip-audit skips
+- [ ] `pip-audit` / `npm audit` clean (or accepted findings documented). pip-audit skips
       `torch`/`torchaudio` because of the `+cpu` local version, so check those two on
       [osv.dev](https://osv.dev). (2026-10-06: torch 2.14.0 and torchaudio 2.11.0 have 0 known vulns.)
 
@@ -165,6 +166,6 @@ download. Interview data never goes over the network.
 - huggingface_hub telemetry: https://huggingface.co/docs/huggingface_hub/en/package_reference/utilities
 - DNS rebinding on localhost: https://github.blog/security/application-security/dns-rebinding-attacks-explained-the-lookup-is-coming-from-inside-the-house/
 - uv exclude-newer cooldown: https://pydevtools.com/handbook/how-to/how-to-protect-against-python-supply-chain-attacks-with-uv/
-- pnpm hardening: https://www.nodejs-security.com/blog/hardening-your-npm-pnpm-config-for-shai-hulud
+- npm and pnpm hardening (install scripts, release age): https://www.nodejs-security.com/blog/hardening-your-npm-pnpm-config-for-shai-hulud
 - OneDrive auto folder backup: https://www.pcworld.com/article/2376883/attention-microsoft-activates-this-feature-in-windows-11-without-asking-you.html
 - wav2vec2 German model files: https://huggingface.co/jonatasgrosman/wav2vec2-large-xlsr-53-german

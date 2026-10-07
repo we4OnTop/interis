@@ -168,8 +168,11 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
   releases), and PyTorch only from the official CPU index, scoped to torch/torchaudio.
 - Audits: `pip-audit` + `osv-scanner` on the lockfile, before every dependency update and
   in a pre-commit/CI task.
-- Frontend: **pnpm 10** (lifecycle scripts off by default), `minimumReleaseAge: 10080`
-  (7 days), committed lockfile, `pnpm audit`, few dependencies (see DEPENDENCIES.md).
+- Frontend: **npm** with a committed `frontend/package-lock.json`, `ignore-scripts=true`
+  (no install scripts run), `save-exact=true`, `npm audit`, few dependencies (see
+  DEPENDENCIES.md). Open point: npm 10 has no release-age setting, so the 7-day cooldown
+  that applies to Python is **not** enforced for the frontend. Moving to pnpm (which has one)
+  is a decision still to be made.
 - No `trust_remote_code`. No dynamic plugin loading. No `subprocess(shell=True)`.
 
 **Model files (threat 3):**
@@ -453,7 +456,7 @@ interis/
     api/     app.py security.py routers/*.py
     worker/  runner.py
     export/  json_export.py docx_export.py xlsx_export.py   (qda/ later)
-  web/       package.json pnpm-lock.yaml .npmrc src/ (React + TS)
+  web/       package.json package-lock.json .npmrc src/ (React + TS)
   tests/     unit/ pipeline/ (short German sample) api/ security/ (guard, host, csrf)
   scripts/   firewall.ps1  create-container.md
 ```
