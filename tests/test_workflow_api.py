@@ -2,6 +2,8 @@
 
 import io
 import json
+import sys
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +14,8 @@ from interis.config import Paths
 from interis.web import extracts as export
 from interis.web.app import create_app
 from interis.web.edits import edits_digest
+from interis.web.jobs import JobRunner, job_message
+from interis.web.review import _dialogue, passage
 from interis.web.store import Store
 from interis.web.workflow import STEPS, workflow_state
 from tests.test_analysis import FakeEncoder, _interview
@@ -173,7 +177,9 @@ def test_retranscription_confirmation_counts_new_markings(client, data_dir):
                        json={}).status_code == 409
     assert client.post("/api/interviews/T1/transcribe", headers=H,
                        json={"discard_markings": True}).status_code == 200
-    assert _store(data_dir).word_edits("T1") == []
+    # kept until the new transcript exists: the finished job removes them
+    assert len(_store(data_dir).word_edits("T1")) == 1
+    assert _edit(client, **_span(text="waren")).status_code == 409  # job queued: no marking
 
 
 # ------------------------------------------------------------------ decisions
@@ -202,7 +208,7 @@ def test_interview_lists_decisions(client):
     client.put("/api/interviews/T1/questions/F3/decision", headers=H,
                json={"reason": "not_asked", "note": ""})
     assert _interview_json(client)["decisions"] == [
-        {"guide_code": "F3", "reason": "not_asked", "note": ""}]
+        {"guide_code": "F3", "reason": "not_asked", "note": "", "in_guide": True}]
 
 
 # ------------------------------------------------------------------ extracts
@@ -412,3 +418,262 @@ def test_analysis_job_passes_edits_file_and_removes_it(data_dir):
         runner.stop()
     assert store.job(job)["status"] == "done" and store.job(job)["message"] == "1"
     assert list(data_dir.tmp.glob("edits-*.json")) == []
+
+
+# ------------------------------------------------------------------ one kind per word
+
+def test_one_kind_of_edit_per_word(client):
+    assert _edit(client, turn=1, first=2, last=2, action="delete", kind="smoothing",
+                 text="", tag="Füllwort").status_code == 200
+    # a correction over a smoothed word is refused; the reason is not silently replaced
+    r = _edit(client, **_span(first=1, last=2))
+    assert r.status_code == 409
+    assert r.json()["detail"] == "Diese Stelle hat schon eine andere Änderung: erst zurücknehmen"
+    assert _interview_json(client)["turns"][1]["words"][2]["g"] == "Füllwort"
+    # the same kind overwrites
+    assert _edit(client, turn=1, first=2, last=2, action="delete", kind="smoothing",
+                 text="", tag="Dialekt").status_code == 200
+    assert _interview_json(client)["turns"][1]["words"][2]["g"] == "Dialekt"
+
+
+# ------------------------------------------------------------------ position-keyed writes
+
+LINK = {"interview": "T1", "turn": 1, "first": 0, "last": 2, "guide_code": "F4"}
+
+
+def test_position_writes_wait_for_a_queued_transcription(client, data_dir):
+    audio = data_dir.root / "orig.wav"
+    audio.write_bytes(b"RIFF")
+    store = _store(data_dir)
+    store.register_interview("T1", audio)
+    link_id = client.post("/api/links", headers=H, json=LINK).json()["id"]
+    eid = _extract(client).json()["id"]
+    url = "/api/interviews/T1/questions/F3/decision"
+    assert client.post("/api/interviews/T1/transcribe", headers=H,
+                       json={"discard_markings": True}).status_code == 200
+
+    assert client.post("/api/questions", headers=H, json={
+        "interview": "T1", "turn": 2, "first": 0, "last": 1}).status_code == 409
+    assert client.post("/api/questions/reset", headers=H, json={
+        "interview": "T1", "turn": 1, "first": 0}).status_code == 409
+    assert client.post("/api/links", headers=H, json=LINK).status_code == 409
+    assert client.patch(f"/api/links/{link_id}", headers=H,
+                        json={"omitted": True}).status_code == 409
+    assert client.delete(f"/api/links/{link_id}", headers=H).status_code == 409
+    assert _extract(client).status_code == 409
+    assert client.patch(f"/api/extracts/{eid}", headers=H,
+                        json={"paraphrase": "neu"}).status_code == 409
+    assert client.delete(f"/api/extracts/{eid}", headers=H).status_code == 409
+    assert client.put(url, headers=H, json={"reason": "other"}).status_code == 409
+    assert client.put("/api/interviews/T1/reviewed", headers=H,
+                      json={"reviewed": True}).status_code == 409
+    assert _edit(client, **_span()).status_code == 409
+    # nothing was written meanwhile
+    assert store.links("T1")[0]["omitted"] is False and store.decisions("T1") == []
+
+
+def test_relinking_keeps_the_stored_omitted_flag_and_note(client, data_dir):
+    client.post("/api/links", headers=H, json={**LINK, "omitted": True,
+                                                "note": "Schon in Frage 2 erzählt"})
+    client.post("/api/links", headers=H, json=LINK)  # no flag, no note given
+    (row,) = _store(data_dir).links("T1")
+    assert row["omitted"] is True and row["note"] == "Schon in Frage 2 erzählt"
+    client.post("/api/links", headers=H, json={**LINK, "omitted": False, "note": ""})
+    (row,) = _store(data_dir).links("T1")
+    assert row["omitted"] is False and row["note"] == ""
+
+
+def test_links_carry_the_effective_passage(client):
+    client.post("/api/links", headers=H, json=LINK)
+    (lk,) = _interview_json(client)["links"]
+    assert lk["text"].startswith("Ich bin") and lk["turn"] == 1
+    assert 0 <= lk["start"] < lk["end"]
+
+
+def test_compare_reports_stale_analysis_per_interview(client):
+    assert client.get("/api/projects/1/compare").json()["stale"] == {"T1": False}
+    _edit(client, **_span())
+    assert client.get("/api/projects/1/compare").json()["stale"] == {"T1": True}
+
+
+def test_running_analysis_does_not_block_a_new_one(client, data_dir):
+    store = _store(data_dir)
+    running = store.add_job("analyze", "T1")
+    store.update_job(running, status="running")
+    assert client.post("/api/interviews/T1/analyze", headers=H).json() == {"queued": 1}
+    assert client.post("/api/interviews/T1/analyze", headers=H).json() == {"queued": 0}
+
+
+# ------------------------------------------------------------------ input rules
+
+@pytest.mark.parametrize("text", ["\u202eabc", "a\u200bb", "\ud800", "a\u2028b", "a\u2029b"])
+def test_format_surrogate_and_separator_characters_are_refused(client, text):
+    # json.dumps escapes a lone surrogate, so the body stays valid UTF-8
+    def raw_post(url, body):
+        return client.post(url, headers={**H, "Content-Type": "application/json"},
+                           content=json.dumps(body))
+
+    assert raw_post("/api/interviews/T1/edits", _span(text=text)).status_code == 422
+    assert raw_post("/api/extracts", {"interview": "T1", "turn": 1, "first": 0, "last": 2,
+                                      "guide_code": "F1", "paraphrase": text}
+                    ).status_code == 422
+
+
+def test_multiline_text_keeps_line_breaks(client):
+    assert _extract(client, paraphrase="Erste Zeile\nZweite Zeile").status_code == 200
+
+
+# ------------------------------------------------------------------ workflow and extracts
+
+def test_extracts_of_removed_guide_questions_are_kept_but_not_counted(client):
+    _extract(client, guide_code="F1")
+    _extract(client, guide_code="F4")
+    kept = "".join(line for line in GUIDE.splitlines(True) if "F4" not in line)
+    assert client.put("/api/projects/1/guide", headers=H, json={"text": kept}).status_code == 200
+    rows = client.get("/api/projects/1/extracts").json()["extracts"]
+    assert sorted((r["guide_code"], r["in_guide"]) for r in rows) == [("F1", True), ("F4", False)]
+    row = client.get("/api/projects/1/workflow").json()["interviews"][0]
+    assert row["extracts"] == 1 and row["done"]["extract"] is True
+    csv_text = client.get("/api/projects/1/extracts/export", params={"format": "csv"}
+                          ).content.decode("utf-8-sig")
+    assert "T1;F4;" in csv_text  # the export keeps every row
+
+
+def test_extract_outside_the_transcript_is_neither_listed_nor_counted(client, data_dir):
+    _store(data_dir).add_extract("T1", "F1", 99, 0, 0, "verwaist")
+    assert client.get("/api/projects/1/extracts").json()["extracts"] == []
+    row = client.get("/api/projects/1/workflow").json()["interviews"][0]
+    assert row["extracts"] == 0 and row["done"]["extract"] is False
+
+
+def test_exports_survive_control_characters_in_the_guide(client):
+    from docx import Document
+
+    text = GUIDE.replace("Wie sieht", "Wie\x1b sieht")
+    assert client.put("/api/projects/1/guide", headers=H, json={"text": text}).status_code == 200
+    _extract(client)
+    r = client.get("/api/projects/1/extracts/export", params={"format": "docx"})
+    assert r.status_code == 200
+    assert Document(io.BytesIO(r.content)).tables[0].rows[1].cells[2].text == \
+        "Wie sieht Ihr Arbeitsalltag aus?"
+    assert client.get("/api/projects/1/extracts/export",
+                      params={"format": "csv"}).status_code == 200
+
+
+def test_saving_the_guide_writes_the_codes_of_unlabelled_questions(client):
+    text = GUIDE + "- Neue Frage ohne Code?\n"
+    assert client.put("/api/projects/1/guide", headers=H, json={"text": text}).status_code == 200
+    saved = client.get("/api/projects/1").json()["guide_text"]
+    assert saved == GUIDE + "- F5: Neue Frage ohne Code?\n"
+    assert [q["code"] for q in client.get("/api/projects/1").json()["guide"]["questions"]] == \
+        ["F1", "F2", "F3", "F4", "F5"]
+
+
+def test_cli_transcription_replaces_the_markings_with_the_transcript(data_dir, monkeypatch,
+                                                                     tmp_path):
+    from interis.cli import build_parser, cmd_transcribe
+    from interis.pipeline import run
+
+    store = _store(data_dir)
+    store.set_word_edits("T1", [{"turn": 1, "word": 1, "action": "replace",
+                                 "kind": "correction", "text": "war", "tag": ""}])
+    store.set_reviewed("T1", True)
+    audio = tmp_path / "rec.wav"
+    audio.write_bytes(b"RIFF")
+    new = _interview()
+    new.meta.update({"interview_id": "T1", "audio": {"duration_s": 30.0, "sha256": "y"}})
+    monkeypatch.setattr(run, "run_pipeline", lambda *_a, **_k: new)
+
+    args = build_parser().parse_args(["--data-dir", str(data_dir.root), "transcribe",
+                                      str(audio), "--id", "T1", "--formats", "json"])
+    assert cmd_transcribe(args, data_dir) == 0
+    assert store.word_edits("T1") == [] and store.reviewed("T1") is False
+
+
+def test_workflow_explain_needs_a_guide():
+    row = {"id": "I01", "transcribed": True, "reviewed": False, "edits": [], "edits_stale": False,
+           "cells": {}, "unassigned": 0, "extracts": 0}
+    out = workflow_state([], [row])
+    assert out["interviews"][0]["done"]["explain"] is False
+
+
+def test_overlapping_question_marks_are_shown_once():
+    from interis.analysis.analyze import AskedQuestion
+    from tests.test_analysis import _turn as make_turn
+
+    t = _interview()
+    t.turns = [make_turn("S0", 0, "Wie war Ihre Kindheit?")]
+
+    def question(first, last):
+        p = passage(t, 0, first, last)
+        return AskedQuestion(id="", turn=0, first=first, last=last, start=p["start"],
+                             end=p["end"], text=p["text"], speaker="S0", kind="question",
+                             reasons=["manual"], confidence=1.0, match="main", guide_code="F1")
+
+    pieces = _dialogue(t, 0, 1, [question(0, 3), question(2, 3)])[0]["pieces"]
+    assert [p["text"] for p in pieces] == ["Wie war Ihre Kindheit?"]
+
+
+# ------------------------------------------------------------------ transcription jobs
+
+def _run_queue(data_dir, script, job_ids):
+    """Run the job queue with ``script`` as the child process until the jobs have ended."""
+    store = _store(data_dir)
+
+    class Fake(JobRunner):
+        def command(self, job):
+            return [sys.executable, "-c", script]
+
+    runner = Fake(data_dir, store, lambda _i: None, lambda _i: "")
+    runner.start()
+    try:
+        deadline = time.time() + 30
+        while time.time() < deadline and any(
+                store.job(j)["status"] not in ("done", "failed", "cancelled") for j in job_ids):
+            time.sleep(0.05)
+    finally:
+        runner.stop()
+    return [store.job(j) for j in job_ids]
+
+
+def _retranscribe(client, data_dir):
+    audio = data_dir.root / "orig.wav"
+    audio.write_bytes(b"RIFF")
+    _store(data_dir).register_interview("T1", audio)
+    _edit(client, **_span())
+    client.put("/api/interviews/T1/reviewed", headers=H, json={"reviewed": True})
+    r = client.post("/api/interviews/T1/transcribe", headers=H, json={"discard_markings": True})
+    assert r.status_code == 200
+    return r.json()["job"]
+
+
+def test_finished_transcription_removes_the_markings(client, data_dir):
+    job = _retranscribe(client, data_dir)
+    (done,) = _run_queue(data_dir, "print('ok')", [job])
+    assert done["status"] == "done"
+    assert _store(data_dir).word_edits("T1") == [] and not _store(data_dir).reviewed("T1")
+
+
+def test_failed_transcription_keeps_the_markings(client, data_dir):
+    job = _retranscribe(client, data_dir)
+    script = "import sys; print('ERROR: boom', file=sys.stderr); sys.exit(1)"
+    (failed,) = _run_queue(data_dir, script, [job])
+    assert failed["status"] == "failed" and failed["message"] == "ERROR: boom"
+    assert len(_store(data_dir).word_edits("T1")) == 1
+
+
+def test_job_cancelled_before_it_starts_stays_cancelled(data_dir):
+    store = _store(data_dir)
+    job_id = store.add_job("analyze", "T1")
+    runner = JobRunner(data_dir, store, lambda _i: None, lambda _i: "")
+    job = store.job(job_id)  # the worker read the job as queued ...
+    assert runner.cancel(job_id)  # ... then it was cancelled
+    runner._execute(job, [sys.executable, "-c", "print('ran')"])
+    assert store.job(job_id)["status"] == "cancelled"
+
+
+def test_job_messages_show_no_folders():
+    text = "[Errno 13] Permission denied: '/data/tmp/edits-7.json'\nmore"
+    assert job_message(text) == "[Errno 13] Permission denied: 'edits-7.json'"
+    assert job_message("ERROR: file not found: C:\\Daten\\x.wav") == \
+        "ERROR: file not found: x.wav"

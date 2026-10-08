@@ -88,3 +88,17 @@ def test_retry_of_a_transcription_does_not_silently_replace_work(tmp_path):
     store.update_job(job["id"], status="failed")
     r = c.post(f"/api/jobs/{job['id']}/retry", headers=H)
     assert r.status_code == 409
+
+
+def test_links_outside_the_transcript_are_ignored_not_fatal():
+    # rows left behind by a transcript that was replaced must not turn the view into a 500
+    from interis.analysis.guide import parse_guide
+    from interis.pipeline.types import Transcript, Turn, Word
+    from interis.web.review import interview_state
+
+    t = Transcript(meta={}, speakers=[], turns=[Turn("A", 0.0, 1.0, [Word(" a", 0.0, 1.0, 0.9)])],
+                   analysis={})
+    stale = [{"id": 1, "guide_code": "F1", "turn": 5, "first": 0, "last": 3, "status": "confirmed",
+              "omitted": False, "note": "", "source": "manual"}]
+    state = interview_state(t, [], stale, parse_guide("- F1: Wie geht es Ihnen?"))
+    assert state["cells"]["F1"]["status"] == "missing"

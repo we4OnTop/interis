@@ -269,7 +269,10 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
     _write_outputs(transcript, out_dir, args.formats)
     from interis.web.store import Store
 
-    Store(paths.root / "interis.db").register_parts(transcript.meta["interview_id"], audio)
+    store = Store(paths.root / "interis.db")
+    store.register_parts(transcript.meta["interview_id"], audio)
+    # the new transcript has new word positions: markings made on the old one are removed
+    store.delete_decisions(transcript.meta["interview_id"])
     elapsed = time.monotonic() - started
     duration = transcript.meta["audio"]["duration_s"]
     print(f"{_summary(transcript)}")

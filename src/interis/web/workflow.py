@@ -17,7 +17,8 @@ STEPS: list[dict[str, str]] = [
              "alle Änderungen werden separat gespeichert."},
     {"id": "correct", "title": "Korrigieren",
      "text": "Falsch erkannte Wörter ersetzen (Modus „Korrigieren“). Danach „Korrektur "
-             "abgeschlossen“ setzen."},
+             "abgeschlossen“ setzen. Korrekturen machen die Analyse veraltet: danach „Analyse "
+             "aktualisieren“ wählen."},
     {"id": "smooth", "title": "Glätten (optional)",
      "text": "Füllwörter, Wortwiederholungen und Satzabbrüche entfernen (Modus „Glätten“) und "
              "jede Änderung mit einem Grund versehen. Die Analyse nutzt danach den geglätteten "
@@ -65,7 +66,8 @@ def interview_row(i: dict[str, Any], guide_codes: list[str]) -> dict[str, Any]:
             "correct": i["reviewed"],
             "smooth": smoothing > 0,
             "assign": i["transcribed"] and i["unassigned"] == 0,
-            "explain": i["transcribed"] and counts["missing"] == 0,
+            # without a guide there is nothing to explain yet
+            "explain": i["transcribed"] and bool(guide_codes) and counts["missing"] == 0,
             "extract": i["extracts"] > 0,
         },
     }

@@ -19,15 +19,18 @@ import io
 import json
 import re
 import shutil
+import threading
 import unicodedata
 import zipfile
+from collections import Counter
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import AfterValidator, BaseModel, Field
 
 from interis.analysis.guide import (
@@ -35,6 +38,7 @@ from interis.analysis.guide import (
     GuideError,
     GuideQuestion,
     docx_to_guide_text,
+    label_guide,
     load_guide,
     parse_guide,
 )
@@ -100,8 +104,9 @@ class LinkCreate(Span):
     guide_code: str = Field(max_length=40)
     status: Literal["confirmed", "rejected"] = "confirmed"
     source: Literal["manual", "suggestion"] = "manual"
-    omitted: bool = False
-    note: str = Field(default="", max_length=2000)
+    # None: keep the stored value of an existing link
+    omitted: bool | None = None
+    note: str | None = Field(default=None, max_length=2000)
 
 
 class LinkUpdate(BaseModel):
@@ -114,16 +119,20 @@ class ProjectCreate(BaseModel):
     hotwords: str = Field(default="", max_length=2000)
 
 
+# control, format, surrogate, line and paragraph separator characters
+_UNSAFE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
 def _plain(value: str) -> str:
-    """One-line text: no control characters at all (no tab, no newline)."""
-    if any(unicodedata.category(c) == "Cc" for c in value):
+    """One-line text: no control or invisible format characters at all."""
+    if any(unicodedata.category(c) in _UNSAFE_CATEGORIES for c in value):
         raise ValueError("Steuerzeichen sind nicht erlaubt")
     return value
 
 
 def _multiline(value: str) -> str:
     """Text from a textarea: line breaks allowed, other control characters not."""
-    if any(unicodedata.category(c) == "Cc" and c not in "\r\n" for c in value):
+    if any(unicodedata.category(c) in _UNSAFE_CATEGORIES and c not in "\r\n" for c in value):
         raise ValueError("Steuerzeichen sind nicht erlaubt")
     return value
 
@@ -298,6 +307,9 @@ def create_app(paths: Paths, login_token: str, port: int,
         return project["hotwords"].strip() if project else ""
 
     runner = JobRunner(paths, store, job_guide, job_hotwords)
+    # Every check of the job queue or of word positions and the write it guards runs under
+    # this lock, so a transcription cannot start between the check and the write.
+    write_lock = threading.Lock()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -307,6 +319,14 @@ def create_app(paths: Paths, login_token: str, port: int,
 
     app = secure_app(login_token, port, lifespan)
     app.state.runner = runner
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_input(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        # The default answer echoes the rejected value; a lone surrogate in it cannot be
+        # encoded as UTF-8, which turned the 422 into a 500. Location, message and type stay.
+        detail = [{"loc": list(e["loc"]), "msg": e["msg"], "type": e["type"]}
+                  for e in exc.errors()]
+        return JSONResponse({"detail": detail}, status_code=422)
     add_system_routes(app, paths, store, runner, on_restart)
 
     # ------------------------------------------------------------------ helpers
@@ -329,16 +349,17 @@ def create_app(paths: Paths, login_token: str, port: int,
         return [j for j in store.jobs(ids) if j["status"] in ("queued", "running")]
 
     def _queue_analysis(ids: list[str]) -> int:
-        """Re-run the question analysis (not the transcription) after a guide change."""
-        pending = {(j["kind"], j["interview_id"]) for j in _active_jobs(ids)}
+        """Re-run the question analysis (not the transcription) after a guide change or edit.
+        A running analysis does not block: it read the edits before they were changed."""
         n = 0
-        for iid in ids:
-            if not (paths.exports / iid / f"{iid}.json").is_file():
-                continue
-            if ("analyze", iid) in pending or ("transcribe", iid) in pending:
-                continue
-            store.add_job("analyze", iid)
-            n += 1
+        with write_lock:
+            pending = {j["interview_id"] for j in _active_jobs(ids)
+                       if j["kind"] == "analyze" and j["status"] == "queued"}
+            for iid in ids:
+                if not (paths.exports / iid / f"{iid}.json").is_file() or iid in pending:
+                    continue
+                store.add_job("analyze", iid)
+                n += 1
         runner.notify()
         return n
 
@@ -395,6 +416,13 @@ def create_app(paths: Paths, login_token: str, port: int,
         return interview_state(t, store.question_marks(interview), store.links(interview),
                                guide, store.word_edits(interview), store.decisions(interview))
 
+    def _with_passage(t: Transcript, lk: dict[str, Any]) -> dict[str, Any]:
+        """A link with the passage fields of the effective transcript (none if the link
+        points outside the transcript, as stale rows of a replaced transcript can)."""
+        if lk["turn"] >= len(t.turns) or lk["last"] >= len(t.turns[lk["turn"]].words):
+            return lk
+        return {**lk, **passage(t, lk["turn"], lk["first"], lk["last"])}
+
     def _paraphrase(text: str) -> str:
         if not text.strip():
             raise HTTPException(422, "Kernaussage fehlt")
@@ -407,15 +435,19 @@ def create_app(paths: Paths, login_token: str, port: int,
         return tags
 
     def _not_transcribing(interview: str) -> None:
-        """Word positions change with a new transcription, so no edits meanwhile."""
+        """Word positions change with a new transcription, so no marking is written meanwhile
+        (edits, question marks, links, extracts, decisions, "Korrektur abgeschlossen")."""
         if any(j["kind"] == "transcribe" and j["status"] in ("queued", "running")
                for j in store.jobs([interview])):
             raise HTTPException(409, "Erst die laufende Transkription abwarten")
 
     def _extract_rows(pid: int) -> list[dict[str, Any]]:
-        """Extracts of a project; ``text`` and times come from the effective transcript."""
+        """Extracts of a project; ``text`` and times come from the effective transcript.
+        ``in_guide`` is False for a guide code that the guide no longer has."""
         ids = store.project_interviews(pid)
         transcripts = data.transcripts(ids)
+        guide, _ = data.guide(pid)
+        codes = {q.code for q in guide.questions} if guide else set()
         effective: dict[str, Transcript] = {}
         rows = []
         for e in store.extracts(ids):
@@ -431,7 +463,8 @@ def create_app(paths: Paths, login_token: str, port: int,
             rows.append({"id": e["id"], "interview": iid, "guide_code": e["guide_code"],
                          "turn": e["turn"], "first": e["first"], "last": e["last"],
                          "start": p["start"], "end": p["end"], "text": p["text"],
-                         "paraphrase": e["paraphrase"], "updated_at": e["updated_at"]})
+                         "paraphrase": e["paraphrase"], "updated_at": e["updated_at"],
+                         "in_guide": e["guide_code"] in codes})
         return rows
 
     def _check_span(t: Transcript, s: Span | QuestionDelete | WordRange,
@@ -524,12 +557,13 @@ def create_app(paths: Paths, login_token: str, port: int,
     def save_guide(pid: int, body: GuideText) -> dict[str, int]:
         _project(pid)
         try:
-            guide = parse_guide(body.text)
+            text = label_guide(body.text)  # codes of unlabelled questions are kept from now on
+            guide = parse_guide(text)
         except GuideError as e:
             raise HTTPException(422, f"Leitfaden: {e}") from e
         target = data.guide_file(pid)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(body.text, encoding="utf-8")
+        target.write_text(text, encoding="utf-8")
         queued = _queue_analysis(store.project_interviews(pid))
         return {"questions": len(guide.questions), "reanalyze": queued}
 
@@ -628,7 +662,6 @@ def create_app(paths: Paths, login_token: str, port: int,
     @app.post("/api/interviews/{interview}/transcribe")
     def start_transcription(interview: str, body: TranscribeRequest) -> dict[str, int]:
         _interview_in_project(interview)
-        _not_busy(interview)
         if body.model not in ASR_MODELS:
             raise HTTPException(422, "unknown model")
         parts = store.parts(interview)
@@ -636,11 +669,14 @@ def create_app(paths: Paths, login_token: str, port: int,
             raise HTTPException(422, "Noch keine Aufnahme hochgeladen")
         if not all(p["path"].is_file() for p in parts):
             raise HTTPException(422, "Eine Aufnahme fehlt im Datenordner")
-        if (paths.exports / interview / f"{interview}.json").is_file():
-            if _has_work(interview) and not body.discard_markings:
+        with write_lock:
+            _not_busy(interview)
+            # The markings stay until the new transcript exists (see JobRunner): a job that is
+            # cancelled or fails leaves the interview as it was.
+            if ((paths.exports / interview / f"{interview}.json").is_file()
+                    and _has_work(interview) and not body.discard_markings):
                 raise HTTPException(409, "Neu transkribieren entfernt deine Markierungen")
-            store.delete_decisions(interview)
-        job_id = store.add_job("transcribe", interview, {"model": body.model})
+            job_id = store.add_job("transcribe", interview, {"model": body.model})
         runner.notify()
         return {"job": job_id}
 
@@ -672,6 +708,8 @@ def create_app(paths: Paths, login_token: str, port: int,
             "interviews": list(transcripts),
             "cells": {iid: s["cells"] for iid, s in states.items()},
             "unassigned": {iid: s["unassigned"] for iid, s in states.items()},
+            "stale": {iid: edits_stale(t, store.word_edits(iid))
+                            for iid, t in transcripts.items()},
         }
 
     # ---------------------------------------------------------------- interviews
@@ -680,9 +718,12 @@ def create_app(paths: Paths, login_token: str, port: int,
         t = _transcript(interview)
         edits = store.word_edits(interview)
         original = edited_words(t, edits)  # {(turn, word): {orig, kind, tag, action}}
-        state = _state_of(interview, t, _guide_of(interview))
+        guide = _guide_of(interview)
+        state = _state_of(interview, t, guide)
+        effective = apply_edits(t, edits)
+        codes = {q.code for q in guide.questions} if guide else set()
         turns = []
-        for ti, tu in enumerate(apply_edits(t, edits).turns):
+        for ti, tu in enumerate(effective.turns):
             words = []
             for wi, w in enumerate(tu.words):
                 item: dict[str, Any] = {"t": w.text, "s": w.start, "e": w.end,
@@ -705,18 +746,21 @@ def create_app(paths: Paths, login_token: str, port: int,
             "reviewed": store.reviewed(interview),
             "edits_stale": edits_stale(t, edits),
             "decisions": [{"guide_code": d["guide_code"], "reason": d["reason"],
-                           "note": d["note"]} for d in store.decisions(interview)],
+                           "note": d["note"], "in_guide": d["guide_code"] in codes}
+                          for d in store.decisions(interview)],
             "edits": [{k: e[k] for k in ("turn", "word", "action", "kind", "text", "tag")}
                       for e in edits],
             "questions": state["questions"],
-            "links": store.links(interview),
+            "links": [_with_passage(effective, lk) for lk in store.links(interview)],
             "cells": state["cells"],
         }
 
     @app.put("/api/interviews/{interview}/reviewed")
     def set_reviewed(interview: str, body: ReviewedUpdate) -> dict[str, bool]:
         _transcript(interview)
-        store.set_reviewed(interview, body.reviewed)
+        with write_lock:
+            _not_transcribing(interview)
+            store.set_reviewed(interview, body.reviewed)
         return {"ok": True}
 
     @app.post("/api/interviews/{interview}/edits")
@@ -734,14 +778,22 @@ def create_app(paths: Paths, login_token: str, port: int,
         text = body.text.strip()
         if body.action == "replace" and not text:
             raise HTTPException(422, "Ersatztext fehlt")
-        _not_transcribing(interview)
         rows = []
         for w in range(body.first, body.last + 1):
             first_replaced = body.action == "replace" and w == body.first
             rows.append({"turn": body.turn, "word": w, "kind": body.kind, "tag": body.tag,
                          "action": "replace" if first_replaced else "delete",
                          "text": text if first_replaced else ""})
-        store.set_word_edits(interview, rows)
+        with write_lock:
+            _not_transcribing(interview)
+            # a word carries one kind of edit: a smoothing is not silently replaced by a
+            # correction (or the other way round); the same kind overwrites
+            kinds = {(e["turn"], e["word"]): e["kind"] for e in store.word_edits(interview)}
+            if any(kinds.get((body.turn, w), body.kind) != body.kind
+                   for w in range(body.first, body.last + 1)):
+                raise HTTPException(409, "Diese Stelle hat schon eine andere Änderung: "
+                                         "erst zurücknehmen")
+            store.set_word_edits(interview, rows)
         return {"ok": True, "edited": len(rows)}
 
     @app.post("/api/interviews/{interview}/edits/revert")
@@ -759,10 +811,12 @@ def create_app(paths: Paths, login_token: str, port: int,
     def set_decision(interview: str, code: str, body: DecisionUpdate) -> dict[str, bool]:
         _transcript(interview)
         _check_code(code, _guide_of(interview))
-        if body.reason is None:
-            store.delete_decision(interview, code)
-        else:
-            store.set_decision(interview, code, body.reason, body.note.strip())
+        with write_lock:
+            _not_transcribing(interview)
+            if body.reason is None:
+                store.delete_decision(interview, code)
+            else:
+                store.set_decision(interview, code, body.reason, body.note.strip())
         return {"ok": True}
 
     @app.get("/api/projects/{pid}/workflow")
@@ -772,6 +826,7 @@ def create_app(paths: Paths, login_token: str, port: int,
         transcripts = data.transcripts(ids)
         guide, _ = data.guide(pid)
         codes = [q.code for q in guide.questions] if guide else []
+        extract_counts = Counter(r["interview"] for r in _extract_rows(pid) if r["in_guide"])
         rows = []
         for iid in ids:
             t = transcripts.get(iid)
@@ -786,7 +841,7 @@ def create_app(paths: Paths, login_token: str, port: int,
             rows.append({"id": iid, "transcribed": t is not None,
                          "reviewed": store.reviewed(iid), "edits": edits,
                          "edits_stale": stale, "cells": cells, "unassigned": unassigned,
-                         "extracts": len(store.extracts([iid]))})
+                         "extracts": extract_counts[iid]})
         return workflow_state(codes, rows)
 
     @app.get("/api/projects/{pid}/extracts")
@@ -814,21 +869,32 @@ def create_app(paths: Paths, login_token: str, port: int,
         t = _transcript(body.interview)
         _check_span(t, body, body.last)
         _check_code(body.guide_code, _guide_of(body.interview))
-        return {"id": store.add_extract(body.interview, body.guide_code, body.turn, body.first,
-                                        body.last, _paraphrase(body.paraphrase))}
+        paraphrase = _paraphrase(body.paraphrase)
+        with write_lock:
+            _not_transcribing(body.interview)
+            extract_id = store.add_extract(body.interview, body.guide_code, body.turn,
+                                           body.first, body.last, paraphrase)
+        return {"id": extract_id}
 
     @app.patch("/api/extracts/{extract_id}")
     def update_extract(extract_id: int, body: ExtractUpdate) -> dict[str, bool]:
-        if store.extract(extract_id) is None:
-            raise HTTPException(404, "unknown extract")
-        store.update_extract(extract_id, _paraphrase(body.paraphrase))
+        paraphrase = _paraphrase(body.paraphrase)
+        with write_lock:
+            extract = store.extract(extract_id)
+            if extract is None:
+                raise HTTPException(404, "unknown extract")
+            _not_transcribing(extract["interview_id"])
+            store.update_extract(extract_id, paraphrase)
         return {"ok": True}
 
     @app.delete("/api/extracts/{extract_id}")
     def delete_extract(extract_id: int) -> dict[str, bool]:
-        if store.extract(extract_id) is None:
-            raise HTTPException(404, "unknown extract")
-        store.delete_extract(extract_id)
+        with write_lock:
+            extract = store.extract(extract_id)
+            if extract is None:
+                raise HTTPException(404, "unknown extract")
+            _not_transcribing(extract["interview_id"])
+            store.delete_extract(extract_id)
         return {"ok": True}
 
     @app.get("/api/interviews/{interview}/audio")
@@ -882,14 +948,18 @@ def create_app(paths: Paths, login_token: str, port: int,
         _check_code(body.guide_code, _guide_of(body.interview))
         auto = {(q["turn"], q["first"]) for q in t.analysis.get("questions", [])}
         source = "auto" if (body.turn, body.first) in auto else "manual"
-        store.set_question(body.interview, body.turn, body.first, body.last, body.guide_code,
-                           body.match, body.status, source)
+        with write_lock:
+            _not_transcribing(body.interview)
+            store.set_question(body.interview, body.turn, body.first, body.last, body.guide_code,
+                               body.match, body.status, source)
         return {"ok": True}
 
     @app.post("/api/questions/reset")
     def reset_question(body: QuestionDelete) -> dict[str, bool]:
         _check_span(_transcript(body.interview), body)
-        store.delete_question(body.interview, body.turn, body.first)
+        with write_lock:
+            _not_transcribing(body.interview)
+            store.delete_question(body.interview, body.turn, body.first)
         return {"ok": True}
 
     @app.post("/api/links")
@@ -897,18 +967,31 @@ def create_app(paths: Paths, login_token: str, port: int,
         t = _transcript(body.interview)
         _check_span(t, body, body.last)
         _check_code(body.guide_code, _guide_of(body.interview))
-        link_id = store.set_link(body.interview, body.guide_code, body.turn, body.first,
-                                 body.last, body.status, body.source, body.omitted, body.note)
+        with write_lock:
+            _not_transcribing(body.interview)
+            link_id = store.set_link(body.interview, body.guide_code, body.turn, body.first,
+                                     body.last, body.status, body.source, body.omitted,
+                                     body.note)
         return {"id": link_id}
 
     @app.patch("/api/links/{link_id}")
     def update_link(link_id: int, body: LinkUpdate) -> dict[str, bool]:
-        store.update_link(link_id, body.omitted, body.note)
+        with write_lock:
+            link = store.link(link_id)
+            if link is None:
+                raise HTTPException(404, "unknown link")
+            _not_transcribing(link["interview_id"])
+            store.update_link(link_id, body.omitted, body.note)
         return {"ok": True}
 
     @app.delete("/api/links/{link_id}")
     def delete_link(link_id: int) -> dict[str, bool]:
-        store.delete_link(link_id)
+        with write_lock:
+            link = store.link(link_id)
+            if link is None:
+                raise HTTPException(404, "unknown link")
+            _not_transcribing(link["interview_id"])
+            store.delete_link(link_id)
         return {"ok": True}
 
     return app

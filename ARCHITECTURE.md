@@ -258,7 +258,9 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
     sentences;
   - voice embeddings are biometric data, so they stay in `<data>/voices` and are never
     written to transcripts or exports.
-- `guide`: Markdown guide format (sections, codes, `~` variants, `>` planned probes).
+- `guide`: Markdown guide format (sections, codes, `~` variants, `>` planned probes). A question
+  without a code gets the next `F<n>` above the highest code of the guide; saving the guide in
+  the website writes these codes into the text (`label_guide`), so later edits cannot move them.
 - `analyze`: asked questions → guide matching (main / probe / follow-up), direct answers
   (main questions keep their follow-ups), and "answered elsewhere" suggestions
   (anticipated / later / unasked).
@@ -367,7 +369,8 @@ docs/ABLAUF.md). Modules: `web/edits.py` (pure edit logic), `web/review.py` (eff
   `analysis["edits_digest"]`. `edits_stale` is true when the current digest differs
   (`EMPTY_DIGEST` when there are no edits). The UI shows this as "Analyse veraltet".
 - Saving an edit does not queue an analysis. `POST /api/interviews/{id}/analyze` queues one
-  analysis job (same de-duplication as `_queue_analysis`).
+  analysis job. A queued analysis of the interview is not queued twice; a running one does not
+  block a new one, because it read the edits before they changed (`_queue_analysis`).
 - For an analyze job with edits, `jobs.py` writes the rows to `<data>/tmp/edits-<job>.json`,
   passes `--edits`, and removes the file in a `finally` block. `cmd_analyze` in `cli.py` runs the
   analysis on `apply_edits(raw, edits)` and writes back only the analysis block plus the digest.
@@ -380,10 +383,17 @@ docs/ABLAUF.md). Modules: `web/edits.py` (pure edit logic), `web/review.py` (eff
 - "Korrektur abgeschlossen" is stored as `interviews.reviewed_at` (`PUT
   /api/interviews/{id}/reviewed`). The flag does not check the text.
 - Starting a transcription for an interview that already has markings returns 409 unless
-  `discard_markings` is set. The discard path calls `store.delete_decisions`, which clears every
-  table in `DECISION_TABLES` and `reviewed_at`.
-- Edits are refused (409) while a transcription job of that interview is queued or running
-  (`_not_transcribing`).
+  `discard_markings` is set. The markings stay until the new transcript exists: a transcribe job
+  that exits with code 0 calls `store.delete_decisions` (every table in `DECISION_TABLES` and
+  `reviewed_at`). A cancelled or failed job keeps them. `cmd_transcribe` clears them as well when
+  it writes a new transcript, so the command line cannot leave old positions behind.
+- Every write keyed by word position (edits, question marks and their reset, links, extracts,
+  decisions, "Korrektur abgeschlossen") is refused (409, `_not_transcribing`) while a transcribe
+  job of that interview is queued or running. The check and the write run under one lock
+  (`write_lock` in `create_app`), which also covers the analysis queue and the start of a
+  transcription.
+- A word carries one kind of edit. A span that holds an edit of the other kind is refused (409,
+  "erst zurücknehmen"); the same kind overwrites the word's edit.
 
 ### Decisions on guide questions
 
@@ -391,7 +401,10 @@ docs/ABLAUF.md). Modules: `web/edits.py` (pure edit logic), `web/review.py` (eff
   to 2000 characters. `PUT /api/interviews/{id}/questions/{code}/decision` sets it; `reason: null`
   deletes it. An unknown guide code returns 422.
 - In `interview_state` a cell gets status `explained` when there is neither an asked question
-  nor a confirmed link, but a decision exists.
+  nor a confirmed link, but a decision exists. Decisions in `GET /api/interviews/{id}` carry
+  `in_guide`; a decision for a code the guide no longer has is kept, but no cell shows it.
+- Cell status precedence (`interview_state`): asked > omitted > answered_elsewhere > explained >
+  missing. An omitted link therefore shows "omitted" even when another confirmed link exists.
 
 ### Workflow state
 
@@ -400,19 +413,25 @@ docs/ABLAUF.md). Modules: `web/edits.py` (pure edit logic), `web/review.py` (eff
 - Done rules (`interview_row`): transcribe = transcribed; correct = reviewed; smooth = at least
   one smoothing edit (informational, never blocks); assign = transcribed and no question left
   unmatched (computed by the server, but the "Ablauf" page shows counts instead of a check);
-  explain = transcribed and no guide question missing; extract = at least one extract.
+  explain = transcribed, the guide has at least one question and no guide question is missing;
+  extract = at least one extract of a guide code that the guide still has, on a span of the
+  effective transcript (the same rows the extract list shows).
 
 ### Extracts and exports
 
 - Table `extracts` (id, interview, guide code, span, paraphrase, updated_at). The paraphrase is
   required (non-empty, at most 2000 characters). The span is checked against the transcript.
 - `GET /api/projects/{pid}/extracts` returns the effective passage text and the start and end
-  times of the effective transcript.
+  times of the effective transcript. Each row carries `in_guide`; the export keeps every row,
+  also those whose guide code was removed from the guide (their question column is empty).
 - `GET /api/projects/{pid}/extracts/export?format=docx|csv` builds the file in memory (python-docx
   for DOCX, the `csv` module for CSV) and returns it with `Content-Disposition: attachment`.
   Nothing is written to disk. Columns: Gespräch, Frage, Leitfadenfrage, Kernaussage, Zitat, Zeit.
   CSV: UTF-8 with BOM, `;` as delimiter, CRLF line ends. In CSV, a cell starting with `=`, `+`,
-  `-`, `@`, tab or CR gets a leading apostrophe (`safe_cell`).
+  `-`, `@`, tab or CR gets a leading apostrophe (`safe_cell`). Characters that XML 1.0 cannot
+  carry are removed from both formats (`xml_safe`).
+- The transcript JSON and the Word and text exports are written through a temporary file that
+  replaces the old one (`_replace_file`), so an interrupted write never leaves a half file.
 
 ### Tables and columns added
 
@@ -430,8 +449,8 @@ All under `/api`. Every non-GET request needs the `X-Interis: 1` header and the 
 
 | Method and path | Purpose |
 |---|---|
-| `GET /api/interviews/{id}` | changed: effective text, `o`/`k`/`g` on changed words, `reviewed`, `edits_stale`, `decisions`, `edits` |
-| `GET /api/projects/{pid}/compare` | changed: cells use the effective text |
+| `GET /api/interviews/{id}` | changed: effective text, `o`/`k`/`g` on changed words, `reviewed`, `edits_stale`, `decisions`, `edits`; `links` carry the passage fields |
+| `GET /api/projects/{pid}/compare` | changed: cells use the effective text; `edits_stale` per interview |
 | `PATCH /api/projects/{pid}` | accepts `smoothing_tags`; `GET /api/projects/{pid}` returns `tags` |
 | `POST /api/interviews/{id}/edits` | replace or delete a word span (correction or smoothing) |
 | `POST /api/interviews/{id}/edits/revert` | remove the edits in a span |

@@ -244,7 +244,8 @@ def test_retranscription_requires_confirmation_when_markings_exist(client, data_
                        json={}).status_code == 409
     assert client.post("/api/interviews/T1/transcribe", headers=H,
                        json={"discard_markings": True}).status_code == 200
-    assert store.links("T1") == []
+    # kept until the new transcript exists (the finished job removes them)
+    assert len(store.links("T1")) == 1
 
 
 @pytest.mark.parametrize("iid, ext, status", [

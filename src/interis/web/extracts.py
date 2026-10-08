@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from typing import Any
 
 from docx import Document
@@ -16,6 +17,8 @@ DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.docu
 CSV_MIME = "text/csv; charset=utf-8"
 # Spreadsheet programs run a cell that starts with one of these as a formula.
 FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+# Characters XML 1.0 cannot carry (the DOCX format is XML); tab, newline and CR are kept.
+XML_INVALID = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
 
 
 def clock(seconds: float) -> str:
@@ -37,8 +40,13 @@ def csv_bytes(rows: list[list[str]]) -> bytes:
     """UTF-8 with BOM (so Excel reads umlauts), semicolons, CRLF line ends."""
     buf = io.StringIO()
     writer = csv.writer(buf, delimiter=";", lineterminator="\r\n")
-    writer.writerows([[safe_cell(c) for c in row] for row in rows])
+    writer.writerows([[safe_cell(xml_safe(c)) for c in row] for row in rows])
     return buf.getvalue().encode("utf-8-sig")
+
+
+def xml_safe(value: str) -> str:
+    """The text without the characters a DOCX file cannot store (python-docx refuses them)."""
+    return XML_INVALID.sub("", value)
 
 
 def safe_cell(cell: str) -> str:
@@ -55,7 +63,7 @@ def docx_bytes(rows: list[list[str]]) -> bytes:
     grid.style = "Table Grid"
     for i, row in enumerate(rows):
         for cell, value in zip(grid.add_row().cells, row, strict=True):
-            cell.paragraphs[0].add_run(value).bold = i == 0
+            cell.paragraphs[0].add_run(xml_safe(value)).bold = i == 0
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()

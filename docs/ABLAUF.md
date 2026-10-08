@@ -37,9 +37,10 @@ Funktion `interview_row`). Die Seite zeigt nur an, was der Server berechnet.
 ## 1. Leitfaden festlegen
 
 **Was tun:** Unter „Leitfaden & Gespräche“ im Reiter „Leitfaden“ den Leitfaden eingeben
-oder als Datei laden (.docx, .md, .txt). Jede Frage bekommt einen Code (F1, F2 …). Bei
-einer .docx-Datei gelten nur Zeilen mit „- “ als Fragen; die Oberfläche bittet dann um
-eine Prüfung.
+oder als Datei laden (.docx, .md, .txt). Jede Frage bekommt einen Code (F1, F2 …). Eine Frage
+ohne Code bekommt den nächsten Code über dem höchsten vorhandenen; beim Speichern schreibt
+Interis diesen Code in den Leitfaden, er ändert sich danach nicht mehr. Bei einer
+.docx-Datei gelten nur Zeilen mit „- “ als Fragen; die Oberfläche bittet dann um eine Prüfung.
 
 Wird ein Leitfaden gespeichert, werden alle Gespräche des Projekts neu analysiert. Sie
 werden **nicht** neu transkribiert.
@@ -62,9 +63,10 @@ weiteren Schritte legen sich als Änderungen darüber.
 
 **Achtung:** „Neu transkribieren“ löscht alle Markierungen dieses Gesprächs: Fragenzuordnungen,
 Verknüpfungen, Korrekturen, Glättungen, Begründungen, Extrakte und das Häkchen „Korrektur
-abgeschlossen“. Dafür fragt Interis nach. Die Bestätigung nennt derzeit nur Fragenzuordnungen
-und Verknüpfungen; gelöscht wird aber mehr (`store.delete_decisions`). Während eine
-Transkription läuft, sind keine Änderungen am Transkript möglich.
+abgeschlossen“. Dafür fragt Interis nach, und die Bestätigung nennt genau diese Arten. Gelöscht
+wird erst, wenn die neue Transkription fertig ist. Bricht man den Auftrag ab oder schlägt er
+fehl, bleiben die Markierungen erhalten. Solange eine Transkription wartet oder läuft, lassen
+sich keine Markierungen setzen oder ändern; Interis lehnt das ab.
 
 ## 3. Korrigieren
 
@@ -79,6 +81,12 @@ Transkription läuft, sind keine Änderungen am Transkript möglich.
 Eine Ersetzung über mehrere Wörter schreibt den neuen Text in das erste Wort. Die übrigen
 Wörter des Abschnitts werden gelöscht; ihre Zeitangaben bleiben erhalten. Ein Ersatztext
 darf höchstens 200 Zeichen lang sein.
+
+Ein Wort trägt nur eine Art Änderung. Wer ein korrigiertes Wort glätten will, nimmt zuerst die
+Korrektur zurück; sonst meldet Interis „Diese Stelle hat schon eine andere Änderung“.
+
+Korrekturen machen die Analyse veraltet, wie Glättungen. Danach „Analyse aktualisieren“ wählen,
+damit die Fragenerkennung den korrigierten Text nutzt.
 
 Wenn alle Fehler korrigiert sind, die Checkbox **„Korrektur abgeschlossen“** ankreuzen.
 

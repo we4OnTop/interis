@@ -268,17 +268,27 @@ class Store:
                                  (interview_id,)).fetchall()
         return [{**dict(r), "omitted": bool(r["omitted"])} for r in rows]
 
+    def link(self, link_id: int) -> dict[str, Any] | None:
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM answer_links WHERE id = ?", (link_id,)).fetchone()
+        return {**dict(row), "omitted": bool(row["omitted"])} if row else None
+
     def set_link(self, interview_id: str, guide_code: str, turn: int, first: int, last: int,
-                 status: str, source: str, omitted: bool = False, note: str = "") -> int:
+                 status: str, source: str, omitted: bool | None = None,
+                 note: str | None = None) -> int:
+        """Create or update a link. ``omitted`` and ``note`` that are None keep the stored
+        values of an existing link."""
+        flag = None if omitted is None else int(omitted)
         with self._conn() as c:
             c.execute(
                 "INSERT INTO answer_links (interview_id, guide_code, turn, first, last, status,"
-                " source, omitted, note, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                " source, omitted, note, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0), COALESCE(?, ''), ?) "
                 "ON CONFLICT(interview_id, guide_code, turn, first, last) DO UPDATE SET "
-                "status = excluded.status, omitted = excluded.omitted, note = excluded.note, "
-                "updated_at = excluded.updated_at",
-                (interview_id, guide_code, turn, first, last, status, source, int(omitted),
-                 note, _now()),
+                "status = excluded.status, omitted = COALESCE(?, answer_links.omitted), "
+                "note = COALESCE(?, answer_links.note), updated_at = excluded.updated_at",
+                (interview_id, guide_code, turn, first, last, status, source, flag, note,
+                 _now(), flag, note),
             )
             row = c.execute(
                 "SELECT id FROM answer_links WHERE interview_id = ? AND guide_code = ? AND "

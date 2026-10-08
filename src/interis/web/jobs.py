@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess  # noqa: S404 – fixed argument list, never a shell
 import sys
 import threading
@@ -27,6 +28,14 @@ from interis.config import Paths
 from interis.web.store import Store
 
 POLL_S = 1.0
+
+
+def job_message(text: str) -> str:
+    """First line of a message for the UI, with file paths reduced to their file names.
+    Job messages are shown on the website and must not reveal folders of the data."""
+    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    line = re.sub(r"[^\s'\"]*[\\/]", "", line)
+    return line.replace("\\", "").replace("/", "")[:500]
 
 
 class JobRunner:
@@ -62,15 +71,15 @@ class JobRunner:
         self._wake.set()
 
     def cancel(self, job_id: int) -> bool:
-        job = self.store.job(job_id)
-        if job is None or job["status"] not in ("queued", "running"):
-            return False
-        with self._lock:
+        with self._lock:  # the same lock as _execute: a job cannot start meanwhile
+            job = self.store.job(job_id)
+            if job is None or job["status"] not in ("queued", "running"):
+                return False
             if self._current == job_id and self._proc is not None:
                 self._cancel.add(job_id)
                 self._proc.terminate()
                 return True
-        self.store.update_job(job_id, status="cancelled", message="abgebrochen")
+            self.store.update_job(job_id, status="cancelled", message="abgebrochen")
         return True
 
     # ------------------------------------------------------------------ worker
@@ -84,7 +93,7 @@ class JobRunner:
             try:
                 self._run(job)
             except Exception as e:  # noqa: BLE001 – a broken job must not stop the queue
-                self.store.update_job(job["id"], status="failed", message=str(e)[:500])
+                self.store.update_job(job["id"], status="failed", message=job_message(str(e)))
 
     def command(self, job: dict) -> list[str]:
         iid = job["interview_id"]
@@ -138,8 +147,6 @@ class JobRunner:
 
     def _execute(self, job: dict, cmd: list[str]) -> None:
         job_id = job["id"]
-        self.store.update_job(job_id, status="running", stage="start", progress=0.0,
-                              message="")
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
         if job["kind"] == "models":  # this process is offline; the download child is not
             for key in OFFLINE:
@@ -148,6 +155,10 @@ class JobRunner:
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         tail: deque[str] = deque(maxlen=15)
         with self._lock:
+            if self.store.job(job_id)["status"] != "queued":  # cancelled before it started
+                return
+            self.store.update_job(job_id, status="running", stage="start", progress=0.0,
+                                  message="")
             self._current = job_id
             self._proc = subprocess.Popen(  # noqa: S603 – own CLI, argument list, no shell
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
@@ -183,12 +194,14 @@ class JobRunner:
         if cancelled:
             self.store.update_job(job_id, status="cancelled", message="abgebrochen")
         elif code == 0:
+            if job["kind"] == "transcribe":  # the new transcript replaces the old positions
+                self.store.delete_decisions(job["interview_id"])
             self.store.update_job(job_id, status="done", progress=1.0,
-                                  message=tail[-1] if tail else "")
+                                  message=job_message(tail[-1]) if tail else "")
         else:
             errors = [t for t in tail if "ERROR" in t or "Error" in t]
-            self.store.update_job(job_id, status="failed",
-                                  message=(errors[-1] if errors else "\n".join(tail))[-800:])
+            last = errors[-1] if errors else (tail[-1] if tail else "")
+            self.store.update_job(job_id, status="failed", message=job_message(last))
 
 
 def guide_path_for(paths: Paths, project_id: int) -> Path:

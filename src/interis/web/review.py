@@ -33,6 +33,11 @@ def edits_stale(t: Transcript, edits: list[dict[str, Any]]) -> bool:
     return edits_digest(edits) != t.analysis.get("edits_digest", EMPTY_DIGEST)
 
 
+def span_fits(t: Transcript, turn: int, first: int, last: int) -> bool:
+    """False for a span the transcript no longer has (rows left by an old re-transcription)."""
+    return 0 <= turn < len(t.turns) and 0 <= first <= last < len(t.turns[turn].words)
+
+
 def effective_questions(t: Transcript, marks: list[dict[str, Any]]) -> list[AskedQuestion]:
     """Machine-detected questions with your corrections applied, plus your own marks.
     ``t`` must be the effective transcript (see :func:`apply_edits`)."""
@@ -76,6 +81,8 @@ def _dialogue(t: Transcript, start_turn: int, end_turn: int,
         spans = sorted((q for q in questions if q.turn == ti), key=lambda q: q.first)
         pieces, pos = [], 0
         for q in spans:
+            if q.first < pos:  # overlaps an earlier span of this turn: shown there, once
+                continue
             if q.first > pos:
                 pieces.append({"text": "".join(w.text for w in turn.words[pos:q.first]).strip()})
             pieces.append({"text": q.text, "question": True, "code": q.guide_code,
@@ -100,6 +107,8 @@ def interview_state(t: Transcript, marks: list[dict[str, Any]],
     t = apply_edits(t, edits or [])
     decided = {d["guide_code"]: {"reason": d["reason"], "note": d["note"]}
                for d in decisions or []}
+    marks = [m for m in marks if span_fits(t, m["turn"], m["first"], m["last"])]
+    links = [lk for lk in links if span_fits(t, lk["turn"], lk["first"], lk["last"])]
     questions = effective_questions(t, marks)
     interviewer = interviewer_of(t)
     direct = _direct_answers(t, questions, interviewer) if interviewer else []

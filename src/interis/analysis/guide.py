@@ -9,7 +9,9 @@ Format::
       > Seit wann arbeiten Sie dort?                            (planned probe / Nachfrage)
     - Welche Rolle spielt KI in Ihrer Arbeit?                  (code is generated: F2)
 
-Codes are optional; missing ones are numbered F1, F2, … in order.
+Codes are optional. A question without one gets the next number above the highest code of
+the guide (explicit codes never change). Saving a guide in the website writes these codes
+into the text (:func:`label_guide`), so they stay with their question when the guide is edited.
 """
 
 from __future__ import annotations
@@ -87,15 +89,11 @@ def parse_guide(text: str) -> Guide:
             questions.append(GuideQuestion(code, qtext.strip(), section))
         # other lines (free text, comments) are ignored
 
-    used = {q.code for q in questions if q.code}
-    n = 0
+    top = max((_number(q.code) for q in questions if q.code), default=0)
     for q in questions:
         if not q.code:
-            n += 1
-            while f"F{n}" in used:
-                n += 1
-            q.code = f"F{n}"
-            used.add(q.code)
+            top += 1
+            q.code = f"F{top}"
     codes = [q.code for q in questions]
     duplicates = sorted({c for c in codes if codes.count(c) > 1})
     if duplicates:
@@ -103,6 +101,29 @@ def parse_guide(text: str) -> Guide:
     if not questions:
         raise GuideError("the guide contains no questions (lines starting with '- ')")
     return Guide(title, questions)
+
+
+def _number(code: str) -> int:
+    m = re.search(r"\d+", code)
+    return int(m.group()) if m else 0
+
+
+def label_guide(text: str) -> str:
+    """The guide text with the codes of its unlabelled questions written in, as
+    :func:`parse_guide` numbers them. Everything else is kept as it is."""
+    codes = iter([q.code for q in parse_guide(text).questions])
+    out = []
+    for raw in text.splitlines(keepends=True):
+        line = raw.rstrip("\r\n")
+        stripped = line.strip()
+        if stripped and not stripped.startswith(("## ", "# ", "~", ">")) \
+                and (m := _ITEM.match(line.rstrip())):
+            code = next(codes)
+            if not _CODE.match(m.group(1).strip()):
+                line = re.sub(r"^(\s*(?:[-*]|\d+[.)])\s+)", rf"\g<1>{code}: ", line.rstrip(),
+                              count=1)
+        out.append(line + raw[len(raw.rstrip("\r\n")):])
+    return "".join(out)
 
 
 def load_guide(path: Path) -> Guide:
