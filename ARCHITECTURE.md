@@ -114,7 +114,7 @@ FTS5 virtual table over turn text for full-text search
 
 ```
 GET/POST        /interviews                 list / create (metadata)
-POST            /interviews/{id}/audio      upload (streamed to disk, size-limited, sniffed)
+POST            /interviews/{id}/audio      upload (streamed to disk, size-limited, extension allow-list)
 GET             /interviews/{id}/audio      range-request streaming for the player
 POST            /interviews/{id}/process    enqueue pipeline (params: model, compute_type)
 GET             /jobs?active=1              progress polling
@@ -159,8 +159,9 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
    `python.exe` (created by a setup script, verified by `interis doctor`). This also covers
    native code (CTranslate2, ONNX Runtime).
 4. Model download happens only in an explicit `interis setup-models` command. It runs
-   without the guard, uses pinned revisions, and verifies sha256 against a committed
-   manifest. The HF token is read from an env var for that one run and is never stored.
+   without the guard, uses pinned revisions, and verifies every file's sha256 against the
+   Hub (the commit must match the pinned revision, and only the official Hub is used). The HF
+   token is read from an env var for that one run and is never stored.
 
 **Supply chain (threat 2):**
 - Python: `uv` with committed `uv.lock` (hashes), `uv sync --locked`,
@@ -176,9 +177,12 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
 - No `trust_remote_code`. No dynamic plugin loading. No `subprocess(shell=True)`.
 
 **Model files (threat 3):**
-- torch ≥ 2.10 (fixes CVE-2025-32434 and CVE-2026-24747), with `weights_only=True` loading.
-- Models pinned by HF commit hash, file hashes in `models.lock.json`, checked at worker
-  start.
+- torch ≥ 2.10 (fixes CVE-2025-32434 and CVE-2026-24747). `weights_only=True` is used where
+  the code controls the load (the one-time wav2vec2 conversion). pyannote 4.0.7 needs
+  `weights_only=False`, so its checkpoints are loaded only after the pickle scan passes.
+- Models pinned by HF commit hash. File hashes come from the Hub at download time and are
+  stored in `models.lock.json`, which is checked at worker start. Open point: this lock travels
+  with a copied models folder, so a copy is trusted by its own lock (see DEPENDENCIES.md).
 - Pickle-only checkpoints (e.g. a `.bin` wav2vec2 model) are **converted once to
   safetensors** during setup and from then on loaded only from safetensors.
 - CTranslate2 ≥ 4.8.1 (fixes CVE-2026-102566/-102567 in its model loader).
@@ -200,7 +204,7 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
   `form-action 'none'`. Also `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`
   and `X-Frame-Options: DENY`. The frontend loads **no** CDN scripts or web fonts.
   `tests/test_csp.py` pins the nonce behaviour.
-- Uploads: streamed, size cap, magic-byte sniffing, stored under a UUID name (the user's
+- Uploads: streamed, size cap, extension allow-list (magic-byte sniffing is not implemented), stored under a UUID name (the user's
   filename is never used as a path).
 - Interview text is rendered as text, never as HTML (no `dangerouslySetInnerHTML`).
 
@@ -223,7 +227,8 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
   never lands somewhere unintended. `HF_HOME`, `TORCH_HOME` and `TMP`/`TEMP` are redirected
   into it.
 - **Model lock** lives at `<data>/models/models.lock.json`, not in the repo, because local
-  conversions are machine-specific. Pinned revisions are in `src/interis/models.py`.
+  conversions are machine-specific. It is not a committed manifest: its hashes come from the Hub
+  when the files are downloaded. Pinned revisions are in `src/interis/models.py`.
 - **Pickle scanner** (`security/pickle_scan.py`): static allowlist check of every `.bin`
   checkpoint (wav2vec2 at setup; pyannote at setup **and before every load**, because pyannote
   4.0.7 uses `torch.load(weights_only=False)`).

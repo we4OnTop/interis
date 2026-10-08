@@ -4,11 +4,11 @@
 
 .DESCRIPTION
   1. checks that uv is installed
-  2. installs the exact, locked Python environment (uv sync --locked)
+  2. installs the exact, locked Python environment without the dev tools (uv sync --locked --no-dev)
   3. sets INTERIS_DATA_DIR permanently for your user (your encrypted data folder)
   4. optionally copies already prepared models from another PC (USB stick) – saves ~8 GB
      download and the conversion time; they are verified by hash before every use
-  5. downloads / verifies the models (the only step that uses the internet)
+  5. downloads / verifies the models (steps 2 and 5 are the only ones that use the internet)
   6. tells you how to block internet access for Interis and runs the self-check
 
 .EXAMPLE
@@ -41,7 +41,7 @@ uv --version
 
 # 2. environment
 Step 'Installing the locked Python environment (this can take a few minutes)'
-uv sync --locked
+uv sync --locked --no-dev
 if ($LASTEXITCODE -ne 0) { throw 'uv sync failed' }
 
 # 3. data directory

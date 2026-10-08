@@ -49,6 +49,12 @@ def _progress_json():
 def cmd_setup_models(args: argparse.Namespace, paths: Paths) -> int:
     from interis.models import MODELS, ModelError, setup_model
 
+    if args.use_system_certs:
+        # Antivirus products that inspect HTTPS add their root certificate to the Windows
+        # store; this makes the download trust that store (verification stays on).
+        import truststore
+
+        truststore.inject_into_ssl()
     keys = args.only or list(MODELS)
     token = os.environ.get("HF_TOKEN") or None
     for i, key in enumerate(keys):

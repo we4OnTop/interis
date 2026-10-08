@@ -66,7 +66,7 @@ Voraussetzungen: [Git](https://git-scm.com), [uv](https://docs.astral.sh/uv/)
    ```
 5. **Selbsttest:** `uv run interis doctor`
 
-Updates später: `git pull`, dann `uv sync --locked`.
+Updates später: `git pull`, dann `uv sync --locked --no-dev`.
 
 ## Transkribieren
 

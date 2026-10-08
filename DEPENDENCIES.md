@@ -17,8 +17,8 @@ Legend: 🌐 = can make network calls → how it is neutralised · ⚠ = known i
 | **faster-whisper** | Whisper inference on CPU (int8/float32), word timestamps, bundled Silero VAD (ONNX) | SYSTRAN | MIT | ≥ 1.2 | No known CVEs. 🌐 Downloads models from HF if given a name → we always pass a **local path**. |
 | **ctranslate2** | inference engine under faster-whisper | OpenNMT | MIT | **≥ 4.8.1** | ⚠ CVE-2026-102566 (heap overflow, CVSS 7.8) and CVE-2026-102567 (OOB read) in the model loader, fixed 4.8.1. We only load models we converted ourselves. |
 | **onnxruntime** | runs the Silero VAD (faster-whisper dependency) | Microsoft | MIT | latest 1.x | Native code, covered by the firewall rule. |
-| **av** (PyAV) | the **only** audio decoder (bundles FFmpeg libs) | PyAV project | BSD-3 (FFmpeg LGPL) | latest | FFmpeg parsers have had CVEs over time. Inputs are your own recordings (low risk). Keep updated. Uploads are magic-byte sniffed. |
-| **pyannote.audio** | speaker diarization + speaker embeddings | Hervé Bredin / pyannoteAI (CNRS origin) | MIT | ≥ 4.0 | 🌐 **OpenTelemetry usage metrics ON by default** (pipeline name, version, audio *duration*, speaker counts, session id → otel.pyannote.ai). No audio content, but still disabled: `PYANNOTE_METRICS_ENABLED=0` **before import**. pyannote writes `true` into the env if the variable is unset. Also pulls `pyannoteai-sdk` (cloud API client, never called) and `opentelemetry-exporter-otlp`. Both are blocked by the guard and firewall. Audio passed in memory, so `torchcodec`/FFmpeg DLLs are not used. |
+| **av** (PyAV) | the **only** audio decoder (bundles FFmpeg libs) | PyAV project | BSD-3 (FFmpeg LGPL) | latest | FFmpeg parsers have had CVEs over time. Inputs are your own recordings (low risk). Keep updated. Uploads are checked by extension only (magic-byte sniffing is not implemented). |
+| **pyannote.audio** | speaker diarization + speaker embeddings | Hervé Bredin / pyannoteAI (CNRS origin) | MIT | ≥ 4.0 | 🌐 **OpenTelemetry usage metrics ON by default** (pipeline name, version, audio *duration*, speaker counts, session id → otel.pyannote.ai). No audio content, but still disabled: `PYANNOTE_METRICS_ENABLED=0` **before import**. pyannote writes `true` into the env if the variable is unset. Also pulls `pyannoteai-sdk` (cloud API client, never called) and `opentelemetry-exporter-otlp`. Both are blocked by the guard and firewall. Audio passed in memory; `interis` does not import `torchcodec`, but pyannote installs it, so its native FFmpeg libraries are in the runtime set. |
 | ↳ transitive: lightning, pytorch-metric-learning, torch-audiomentations, torchmetrics, asteroid-filterbanks, pyannote-core/-database/-metrics/-pipeline, safetensors, einops, rich, matplotlib, omegaconf | pyannote internals | various, well known | MIT/Apache/BSD | latest | ⚠ `lightning` has had CVEs (in its app/server parts, not used here). Keep latest, covered by pip-audit. |
 | **huggingface_hub** | model download in `setup-models` only | Hugging Face | Apache-2.0 | latest | 🌐 Telemetry HEAD requests and downloads → `HF_HUB_OFFLINE=1` + `HF_HUB_DISABLE_TELEMETRY=1` at runtime. Token is used only during setup and never saved. |
 | **transformers** | wav2vec2 alignment model (if HF model) + backbone for sentence-transformers. Also the Whisper→CTranslate2 converter at setup. | Hugging Face | Apache-2.0 | **≥ 5.3** | ⚠ CVE-2026-4372 (RCE via crafted model config, 4.56–5.2.x, fixed 5.3). ⚠ CVE-2026-1839 and the Dec-2025 series (deserialization in Trainer/conversion scripts; code paths we do not use). Never `trust_remote_code`. Load only pinned local safetensors. |
@@ -27,8 +27,8 @@ Legend: 🌐 = can make network calls → how it is neutralised · ⚠ = known i
 | **numpy** | arrays | NumFOCUS | BSD-3 | ≥ 2.1 | – |
 
 Removed on purpose: `whisperx` (torch 2.8 pin, runtime downloads), `nltk` (runtime
-`punkt_tab` download; we split sentences on Whisper punctuation), `torchcodec` at runtime
-(Windows FFmpeg DLL issues).
+`punkt_tab` download; we split sentences on Whisper punctuation). `torchcodec` is not imported by
+Interis, but pyannote requires it, so it stays installed (see the pyannote row).
 
 ## 2. Python runtime – server, storage, export
 
@@ -91,14 +91,17 @@ Hardening:
 | **openai/whisper-large-v3** | final, max-precision ASR | Official OpenAI repo | MIT | safetensors → **converted locally** to CTranslate2 with `ct2-transformers-converter`. We don't depend on third-party pre-converted repos. |
 | **openai/whisper-large-v3-turbo** | fast draft ASR | Official OpenAI repo | MIT | Same local conversion. |
 | **pyannote/speaker-diarization-community-1** | diarization + embeddings | pyannote (gated: free HF account + accept conditions once) | CC-BY-4.0 (attribution in thesis) | Pinned revision, Hub hashes verified. ⚠ **pyannote 4.0.7 loads its checkpoints with `torch.load(weights_only=False)`** (`core/model.py`), i.e. full pickle, and we cannot change that without forking. Mitigations: pinned official revision, sha256 check before every use, and Interis' own **static pickle scanner** (`security/pickle_scan.py`) that rejects any checkpoint importing non-allowlisted globals (e.g. `os.system`, `builtins.eval`, getattr chains), run at setup and before every load. |
-| German wav2vec2 aligner: **`jonatasgrosman/wav2vec2-large-xlsr-53-german`** (implemented) | word-level forced alignment | widely used community model | Apache-2.0 | Ships a **pickle checkpoint only** (`pytorch_model.bin`). It is scanned, loaded once via transformers (torch ≥ 2.10 `weights_only` loading), **re-saved as safetensors**, and the `.bin` is deleted. Afterwards it is loaded with `use_safetensors=True` only. |
+| German wav2vec2 aligner: **`jonatasgrosman/wav2vec2-large-xlsr-53-german`** (implemented) | word-level forced alignment | widely used community model | Apache-2.0 | Ships a **pickle checkpoint only** (`pytorch_model.bin`). It is scanned, loaded once via transformers (torch ≥ 2.10 `weights_only` loading), **re-saved as safetensors**, and the `.bin` is deleted. Afterwards it is loaded with `use_safetensors=True` only. The conversion load uses `weights_only=True`. |
 | **intfloat/multilingual-e5-large** (implemented, Phase 2) | sentence embeddings (question ↔ guide matching, answer suggestions) | Microsoft Research | MIT | `model.safetensors`, loaded via transformers (no sentence-transformers dependency). Chosen over e5-base and e5-large-instruct after calibration (ARCHITECTURE.md §6a). `BAAI/bge-m3` was excluded because it ships only pickle weights. |
 | Silero VAD | voice activity detection | bundled inside faster-whisper (ONNX) | MIT | No download. |
 
 Pinned revisions live in `src/interis/models.py`. After preparation, the sha256 of every
 prepared file is written to `<data>/models/models.lock.json`. Conversions are machine-
 specific, so this file lives in the data directory, not the repo. Every pipeline run checks
-the hashes and refuses to start on any difference, including extra files.
+the hashes and refuses to start on any difference, including extra files. Limitation: the lock is
+written after the download and travels with a copied folder (`-ModelsFrom`), so a folder whose
+files and lock were both replaced passes this check. The fix is to commit the expected hashes;
+that needs a Hub-verified list, which is an open item.
 
 ### Verified mirror for the gated pyannote model
 
