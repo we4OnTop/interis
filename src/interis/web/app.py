@@ -15,10 +15,12 @@ Security (see ARCHITECTURE.md §6):
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
 import shutil
 import unicodedata
+import zipfile
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -68,6 +70,9 @@ AUDIO_EXT = {"m4a", "mp3", "wav", "aac", "flac", "ogg", "opus", "wma", "webm", "
              "mkv", "avi", "3gp", "amr"}
 MAX_AUDIO_BYTES = 8 * 1024**3
 MAX_DOCX_BYTES = 20 * 1024**2
+# A .docx is a zip: its parts must stay small after decompression too (zip bomb).
+MAX_DOCX_UNPACKED = 50 * 1024**2
+SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 MAX_GUIDE_CHARS = 200_000
 LEGACY_PROJECT = "Bestehende Interviews"
 
@@ -207,7 +212,12 @@ class _Data:
             if cached is None or cached[0] != mtime:
                 t = Transcript.from_dict(json.loads(path.read_text(encoding="utf-8")))
                 cached = self._cache[path] = (mtime, t)
-            out[cached[1].meta["interview_id"]] = cached[1]
+            # an ID from the file contents becomes a path component later: accept only
+            # IDs that match the folder name and the ID rules
+            if (not INTERVIEW_ID.match(path.stem)
+                    or cached[1].meta.get("interview_id") != path.stem):
+                continue
+            out[path.stem] = cached[1]
         return out
 
     def guide_file(self, project_id: int) -> Path:
@@ -256,6 +266,15 @@ class _Data:
             if t.analysis.get("guide"):
                 return _guide_from_dict(t.analysis["guide"]).to_markdown()
         return None
+
+
+def _docx_unpacked_size(data: bytes) -> int:
+    """Sum of the declared sizes of all parts of a zip-based file (0 if it is not a zip)."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            return sum(info.file_size for info in zf.infolist())
+    except zipfile.BadZipFile:
+        return 0
 
 
 def create_app(paths: Paths, login_token: str, port: int,
@@ -355,6 +374,12 @@ def create_app(paths: Paths, login_token: str, port: int,
         if pid is None:
             raise HTTPException(404, "unknown interview")
         return pid
+
+    def _has_work(interview: str) -> bool:
+        """Anything a person did on this interview that word positions would break."""
+        return bool(store.question_marks(interview) or store.links(interview)
+                    or store.word_edits(interview) or store.extracts([interview])
+                    or store.decisions(interview) or store.reviewed(interview))
 
     def _not_busy(interview: str) -> None:
         if any(j["status"] in ("queued", "running") for j in store.jobs([interview])):
@@ -527,6 +552,8 @@ def create_app(paths: Paths, login_token: str, port: int,
             body.extend(chunk)
             if len(body) > MAX_DOCX_BYTES:
                 raise HTTPException(413, "Datei zu groß")
+        if _docx_unpacked_size(bytes(body)) > MAX_DOCX_UNPACKED:
+            raise HTTPException(413, "Word-Datei enthält zu viel Inhalt")
         try:
             return {"text": docx_to_guide_text(bytes(body))}
         except Exception as e:  # noqa: BLE001 – any malformed file
@@ -610,10 +637,7 @@ def create_app(paths: Paths, login_token: str, port: int,
         if not all(p["path"].is_file() for p in parts):
             raise HTTPException(422, "Eine Aufnahme fehlt im Datenordner")
         if (paths.exports / interview / f"{interview}.json").is_file():
-            has_markings = (store.question_marks(interview) or store.links(interview)
-                            or store.word_edits(interview) or store.extracts([interview])
-                            or store.decisions(interview) or store.reviewed(interview))
-            if has_markings and not body.discard_markings:
+            if _has_work(interview) and not body.discard_markings:
                 raise HTTPException(409, "Neu transkribieren entfernt deine Markierungen")
             store.delete_decisions(interview)
         job_id = store.add_job("transcribe", interview, {"model": body.model})
@@ -629,6 +653,10 @@ def create_app(paths: Paths, login_token: str, port: int,
         job = store.job(job_id)
         if job is None or job["status"] not in ("failed", "cancelled"):
             raise HTTPException(409, "job is not failed or cancelled")
+        if job["kind"] == "transcribe" and _has_work(job["interview_id"]):
+            # a transcription replaces the transcript and every position in it
+            raise HTTPException(409, "Neu transkribieren entfernt deine Arbeit: bitte im "
+                                     "Gespräch neu starten und bestätigen")
         new_id = store.add_job(job["kind"], job["interview_id"], job["options"])
         runner.notify()
         return {"job": new_id}
@@ -835,6 +863,8 @@ def create_app(paths: Paths, login_token: str, port: int,
         if known:
             shas.add(combined_sha(known))
         for sha in shas:
+            if not SHA256_HEX.match(sha):  # a crafted value like ".." must never reach rmtree
+                continue
             cache = paths.cache / sha[:16]
             if cache.parent == paths.cache and cache.is_dir():
                 shutil.rmtree(cache)

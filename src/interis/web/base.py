@@ -58,7 +58,7 @@ def secure_app(login_token: str, port: int, lifespan=None) -> FastAPI:
                 return JSONResponse({"detail": "missing header"}, status_code=403)
         if path.startswith("/api/") and path != "/api/login":
             cookie = request.cookies.get(SESSION_COOKIE, "")
-            if not secrets.compare_digest(cookie, session_value):
+            if not secrets.compare_digest(cookie.encode("utf-8"), session_value.encode()):
                 return JSONResponse({"detail": "not logged in"}, status_code=401)
         response: Response = await call_next(request)
         response.headers["Content-Security-Policy"] = CSP.replace(
@@ -87,7 +87,7 @@ def secure_app(login_token: str, port: int, lifespan=None) -> FastAPI:
 
     @app.post("/api/login")
     def login(body: Login) -> Response:
-        if not secrets.compare_digest(body.token, login_token):
+        if not secrets.compare_digest(body.token.encode("utf-8"), login_token.encode()):
             raise HTTPException(401, "invalid token")
         response = JSONResponse({"ok": True})
         response.set_cookie(SESSION_COOKIE, session_value, httponly=True, samesite="strict",

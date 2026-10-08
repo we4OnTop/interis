@@ -88,7 +88,9 @@ class JobRunner:
 
     def command(self, job: dict) -> list[str]:
         iid = job["interview_id"]
-        base = [sys.executable, "-m", "interis.cli", "--data-dir", str(self.paths.root)]
+        # -I: ignore PYTHON* variables and the working directory, so no other code can be
+        # imported in place of the installed package
+        base = [sys.executable, "-I", "-m", "interis.cli", "--data-dir", str(self.paths.root)]
         if self.paths.models_dir is not None:
             base += ["--models-dir", str(self.paths.models_dir)]
         if job["kind"] == "models":
@@ -163,9 +165,12 @@ class JobRunner:
                 except ValueError:
                     continue
                 now = time.monotonic()
-                if now - last_write >= 1.0 or p["fraction"] >= 1.0:
-                    self.store.update_job(job_id, stage=str(p["stage"])[:40],
-                                          progress=float(p["fraction"]))
+                try:
+                    stage, fraction = str(p["stage"])[:40], float(p["fraction"])
+                except (KeyError, TypeError, ValueError):
+                    continue  # not one of our progress lines; keep reading the output
+                if now - last_write >= 1.0 or fraction >= 1.0:
+                    self.store.update_job(job_id, stage=stage, progress=fraction)
                     last_write = now
             else:
                 tail.append(line)

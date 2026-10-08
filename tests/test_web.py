@@ -345,7 +345,7 @@ def test_job_command_uses_project_guide_and_hotwords(data_dir):
     cmd = runner.command(store.job(store.add_job("transcribe", "I01",
                                                  {"model": "whisper-large-v3-turbo"})))
     assert cmd[cmd.index("transcribe") + 1:cmd.index("--id")] == [str(audio), str(audio)]
-    assert cmd[:3] == [sys.executable, "-m", "interis.cli"]
+    assert cmd[:4] == [sys.executable, "-I", "-m", "interis.cli"]  # isolated child
     assert cmd[cmd.index("--id") + 1] == "I01"
     assert cmd[cmd.index("--guide") + 1] == str(guide)
     assert cmd[cmd.index("--hotwords") + 1] == "Müller SAP"

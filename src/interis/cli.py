@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -90,8 +91,12 @@ def _analysis_options(args: argparse.Namespace, paths: Paths, redo_roles: bool):
 def _write_outputs(transcript, out_dir: Path, formats: str) -> None:
     from interis.export import write_docx, write_json, write_txt
 
+    # the ID comes from the transcript file: it must not carry a path into the file name
+    iid = transcript.meta["interview_id"]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,39}", str(iid)):
+        raise ValueError(f"unsafe interview ID in the transcript: {iid!r}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    base = out_dir / transcript.meta["interview_id"]
+    base = out_dir / iid
     writers = {"json": write_json, "txt": write_txt, "docx": write_docx}
     for fmt in (f.strip() for f in formats.split(",")):
         writers[fmt](transcript, base.with_suffix(f".{fmt}"))
@@ -183,7 +188,11 @@ def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
             return 1
         # Only the analysis goes back into the transcript; its words stay as recorded.
         raw.analysis = {**effective.analysis, "edits_digest": edits_digest(edits)}
-        _write_outputs(raw, src.parent, args.formats)
+        try:
+            _write_outputs(raw, src.parent, args.formats)
+        except ValueError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
         print(f"{raw.meta['interview_id']}: {_summary(raw)}")
     return 0
 

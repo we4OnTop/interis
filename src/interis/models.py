@@ -188,11 +188,23 @@ def is_ready(paths: Paths, key: str) -> bool:
 
 # --------------------------------------------------------------------------- setup
 
+def _hub_endpoint_ok() -> None:
+    """Downloads and their checks use the official Hub only. A changed HF_ENDPOINT would
+    let one server answer both the file and its hash."""
+    endpoint = os.environ.get("HF_ENDPOINT", "").rstrip("/")
+    if endpoint not in ("", "https://huggingface.co"):
+        raise ModelError("HF_ENDPOINT points to another server; refusing to download models")
+
+
 def _verify_against_hub(spec: ModelSpec, raw: Path, token: str | None) -> None:
     from huggingface_hub import HfApi
 
+    _hub_endpoint_ok()
     info = HfApi().model_info(spec.repo, revision=spec.revision, files_metadata=True,
                               token=token)
+    if info.sha != spec.revision:
+        raise ModelError(f"{spec.repo}@{spec.revision}: the Hub resolves this revision to "
+                         f"{info.sha}. Aborting.")
     siblings = {s.rfilename: s for s in info.siblings or []}
     for rel in spec.files:
         sib = siblings.get(rel)
@@ -209,6 +221,8 @@ def _verify_against_hub(spec: ModelSpec, raw: Path, token: str | None) -> None:
 
 def _download(spec: ModelSpec, raw: Path, token: str | None, use_mirror: bool) -> None:
     from huggingface_hub import snapshot_download
+
+    _hub_endpoint_ok()
 
     repo, revision = spec.mirror if use_mirror and spec.mirror else (spec.repo, spec.revision)
     snapshot_download(

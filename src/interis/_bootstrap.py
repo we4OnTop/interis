@@ -10,8 +10,14 @@ Two modes:
 * :func:`disable_telemetry` – used by ``interis setup-models``. Network allowed for the
   explicit model download, but no telemetry.
 * :func:`go_offline` – used by every other command. Telemetry off, all libraries in
-  offline mode, and an audit hook that blocks every non-loopback network connection made
-  from Python. Audit hooks cannot be removed, so this lasts for the whole process.
+  offline mode, and an audit hook that blocks every non-loopback socket operation made from
+  Python (connect, send, name lookups and reverse lookups). Proxy settings are ignored.
+  Audit hooks cannot be removed, so this lasts for the whole process.
+
+What the hook does NOT see: child processes and native code that open sockets themselves.
+Those are covered by the Windows Firewall rule (``scripts/firewall.ps1``), which blocks the
+Python interpreter, and by ``interis doctor``, which checks that the rule exists. Both
+layers are needed; the hook alone is not a complete barrier.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import sys
+import urllib.request
 from typing import Any
 
 TELEMETRY_OFF: dict[str, str] = {
@@ -58,12 +65,19 @@ PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
 proxy_env_removed: dict[str, str] = {}
 
 
+def _no_proxies() -> dict[str, str]:
+    return {}
+
+
 def go_offline() -> None:
     disable_telemetry()
     os.environ.update(OFFLINE)
     for key in PROXY_VARS:
         if key in os.environ:
             proxy_env_removed[key] = os.environ.pop(key)
+    # On Windows urllib also reads the system proxy from the registry, which the environment
+    # check above does not see. Replacing the lookup covers both sources.
+    urllib.request.getproxies = _no_proxies  # type: ignore[assignment]
     install_network_guard()
     _state["offline"] = True
 
@@ -106,10 +120,12 @@ def _audit_hook(event: str, args: tuple[Any, ...]) -> None:
         return
     if event in ("socket.connect", "socket.sendto", "socket.sendmsg"):
         host = _address_host(args[1]) if len(args) > 1 else None
-    elif event == "socket.getaddrinfo":
+    elif event in ("socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyname_ex"):
         host = args[0]
-    elif event == "socket.gethostbyname":
+    elif event == "socket.gethostbyaddr":  # reverse lookup: the address itself is the host
         host = args[0]
+    elif event == "socket.getnameinfo":  # reverse lookup from a socket address
+        host = _address_host(args[0])
     else:
         return
     if not _is_allowed_host(host):
