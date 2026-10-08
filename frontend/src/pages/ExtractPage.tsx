@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { DownloadIcon, LoaderIcon, Trash2Icon } from "lucide-react";
 
+import { LoadError } from "@/components/LoadError";
 import { PlayButton, Time } from "@/components/review";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -15,12 +16,15 @@ export function ExtractPage() {
   const { fail, notify } = useFeedback();
   const pid = detail!.project.id;
   const [rows, setRows] = useState<Extract[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       setRows((await api<{ extracts: Extract[] }>("GET", `/api/projects/${pid}/extracts`)).extracts);
+      setError(null);
     } catch (e) {
       fail(e);
+      setError(e instanceof Error ? e.message : String(e));
     }
   }, [pid, fail]);
 
@@ -39,7 +43,11 @@ export function ExtractPage() {
     return m;
   }, [rows]);
 
-  if (!rows) return <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
+  // extracts of guide questions that were removed or renamed: shown below, so they can still be read and deleted
+  const removed = [...new Set((rows ?? []).filter((x) => !x.in_guide).map((x) => x.guide_code))];
+
+  if (!rows)
+    return error ? <LoadError message={error} onRetry={() => void load()} /> : <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
   if (!questions.length)
     return (
       <p className="text-muted-foreground p-4 sm:p-6 text-sm">
@@ -93,17 +101,51 @@ export function ExtractPage() {
                   <span>{q.text}</span>
                 </div>
                 {ids.map((id) => (
-                  <div key={id} className="min-w-0 space-y-2 border-r border-b p-3">
-                    {(byCell.get(`${q.code}|${id}`) ?? []).map((x) => (
-                      <ExtractItem key={`${x.id}|${x.updated_at}`} x={x} onChanged={load} onNotify={notify} onFail={fail} />
-                    ))}
-                  </div>
+                  <ExtractCell key={id} items={byCell.get(`${q.code}|${id}`)} onChanged={load} onNotify={notify} onFail={fail} />
                 ))}
               </Fragment>
             ))}
+            {removed.length > 0 && (
+              <>
+                <div className="bg-muted sticky left-0 border-b px-3 py-1.5 text-xs font-semibold tracking-wide uppercase" style={{ gridColumn: "1 / -1" }}>
+                  Nicht mehr im Leitfaden
+                </div>
+                {removed.map((code) => (
+                  <Fragment key={code}>
+                    <div className="bg-muted/40 sticky left-0 z-10 border-r border-b p-3">
+                      <span className="text-question mr-1.5 font-semibold">{code}</span>
+                      <span className="text-muted-foreground">Frage nicht mehr im Leitfaden</span>
+                    </div>
+                    {ids.map((id) => (
+                      <ExtractCell key={id} items={byCell.get(`${code}|${id}`)} onChanged={load} onNotify={notify} onFail={fail} />
+                    ))}
+                  </Fragment>
+                ))}
+              </>
+            )}
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ExtractCell({
+  items,
+  onChanged,
+  onNotify,
+  onFail,
+}: {
+  items: Extract[] | undefined;
+  onChanged: () => Promise<void>;
+  onNotify: (text: string) => void;
+  onFail: (e: unknown) => void;
+}) {
+  return (
+    <div className="min-w-0 space-y-2 border-r border-b p-3">
+      {(items ?? []).map((x) => (
+        <ExtractItem key={`${x.id}|${x.updated_at}`} x={x} onChanged={onChanged} onNotify={onNotify} onFail={onFail} />
+      ))}
     </div>
   );
 }

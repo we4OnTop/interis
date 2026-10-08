@@ -6,7 +6,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api, type Cell, type CellStatus, type DialogueTurn, type Link, type Suggestion } from "@/lib/api";
 import { useFeedback } from "@/lib/feedback";
-import { LINK_LABEL, REASON_LABEL, STATUS_LABEL, STATUS_SHORT, stamp, tagText } from "@/lib/format";
+import { LINK_LABEL, REASON_LABEL, STATUS_LABEL, stamp, tagText } from "@/lib/format";
 import { usePlayer, usePlayerState } from "@/lib/player";
 import { useProject } from "@/lib/project";
 import { dragStart, useReview } from "@/lib/review";
@@ -59,8 +59,8 @@ const STATUS_STYLE: Record<CellStatus, string> = {
   missing: "bg-suggest-soft text-suggest",
 };
 
-export function StatusBadge({ status, short = false }: { status: CellStatus; short?: boolean }) {
-  return <Badge className={cn("border-transparent", STATUS_STYLE[status])}>{short ? STATUS_SHORT[status] : STATUS_LABEL[status]}</Badge>;
+export function StatusBadge({ status }: { status: CellStatus }) {
+  return <Badge className={cn("border-transparent", STATUS_STYLE[status])}>{STATUS_LABEL[status]}</Badge>;
 }
 
 /** Small coloured square for the question × interview overview. */
@@ -135,7 +135,7 @@ export function Dialogue({ id, code, turns }: { id: string; code: string | null;
                 ),
               )}
             </div>
-            <div className="flex shrink-0 items-start opacity-0 transition-opacity group-hover:opacity-100">
+            <div className="flex shrink-0 items-start opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
               {!isInterviewer && (
                 <>
                   <Hint text="Ziehen: auf eine Leitfadenfrage legen (Antwort darauf)">
@@ -255,7 +255,7 @@ export function SuggestionItem({ id, code, s, onChanged }: { id: string; code: s
             <CheckIcon />
           </Button>
         </Hint>
-        <Hint text="Verwerfen">
+        <Hint text="Verwerfen (endgültig, nicht rückgängig)">
           <Button variant="ghost" size="icon-xs" className="hover:text-destructive" onClick={() => decide("rejected")}>
             <XIcon />
           </Button>
@@ -316,7 +316,7 @@ export function CellContent({
             </p>
           ) : (
             <p className="text-muted-foreground text-xs">
-              Nicht gestellt. Falls die Antwort woanders steckt: im Transkript markieren → „Antwort auf Frage …“.
+              Keine Antwort erfasst. Falls die Antwort woanders steckt: im Transkript markieren → „Antwort auf Frage …“.
             </p>
           )}
           <Button variant="outline" size="sm" onClick={() => review.decide(id, code, cell.decision)}>

@@ -21,15 +21,16 @@ Funktion `interview_row`). Die Seite zeigt nur an, was der Server berechnet.
 ## Die Seite Ablauf lesen
 
 - **Eine Zeile je Gespräch**, eine Spalte je Schritt mit Haken (erledigt) oder Strich (offen).
-- **Geglättet (optional)** zeigt einen Strich, wenn keine Glättung vorhanden ist. Das ist
+  Die Spaltenüberschriften sind die Schrittnamen.
+- **Glätten (optional)** zeigt einen Strich, wenn keine Glättung vorhanden ist. Das ist
   kein Mangel.
-- **Fragen zugeordnet** zeigt keine Haken, sondern die Zahl der gestellten Leitfadenfragen
+- **Fragen zuordnen** zeigt keine Haken, sondern die Zahl der gestellten Leitfadenfragen
   („gestellt“) und die Zahl der Fragen ohne Leitfaden-Zuordnung („spontan“).
-- **Fehlende geklärt** zeigt „–“, solange das Gespräch nicht transkribiert ist.
+- **Fehlende Fragen klären** zeigt „–“, solange das Gespräch nicht transkribiert ist.
 - **Analyse veraltet** erscheint, wenn Korrekturen oder Glättungen nach der letzten Analyse
   gespeichert wurden (siehe Schritt 4).
-- **offen: F3, F5** nennt die Leitfadenfragen, die in diesem Gespräch noch ohne Antwort und
-  ohne Begründung sind.
+- **fehlt – begründen: F3, F5** nennt die Leitfadenfragen, die in diesem Gespräch noch ohne
+  Antwort und ohne Begründung sind.
 - Die Links führen zum **Transkript** des Gesprächs und zur Ansicht **Nebeneinander**.
 
 ---
@@ -74,7 +75,8 @@ sich keine Markierungen setzen oder ändern; Interis lehnt das ab.
 
 - Ein Wort anklicken, den richtigen Text eingeben und speichern.
 - Oder einen Abschnitt markieren und **„Ersetzen …“** wählen.
-- **„Änderung zurücknehmen“** im Dialog hebt eine Änderung wieder auf.
+- **„Änderung zurücknehmen“** im Dialog hebt eine Änderung wieder auf. Dazu gehören alle Wörter,
+  die dieser Dialog geändert hat (die ersetzte Stelle und die gelöschten Wörter danach).
 - Die Checkbox **„Änderungen anzeigen“** unterstreicht korrigierte Wörter. Darüberfahren
   zeigt den Originaltext.
 
@@ -103,7 +105,8 @@ aus den Glättungs-Tags des Projekts. Standard sind: Füllwort, Wortwiederholung
 Grammatik, Dialekt, Anonymisierung, Sonstiges. Eigene Gründe trägst du unter „Leitfaden &
 Gespräche“ im Reiter „Einstellungen“ ein, eine Zeile pro Grund.
 
-Geglättete Wörter erscheinen bei „Änderungen anzeigen“ durchgestrichen.
+Bei „Änderungen anzeigen“ erscheinen geglättete Wörter durchgestrichen. Ersetzte Glättungen
+sind gestrichelt unterstrichen, Korrekturen durchgezogen unterstrichen.
 
 Nach dem Glätten zeigt Interis **„Analyse veraltet“**. Mit **„Analyse aktualisieren“**
 startest du die Analyse neu. Erst dann nutzt die Fragenerkennung den geglätteten Text.
@@ -146,7 +149,8 @@ begründen“** hat, braucht eine der beiden Angaben:
 
 - **Antwort an anderer Stelle.** Im Transkript die Antwort markieren und **„Antwort auf Frage …“**
   wählen. Oder unter **„Vorschläge – bitte prüfen“** einen Vorschlag übernehmen oder verwerfen.
-  Die Zelle wird dann „anderswo beantwortet“. Wenn die Frage deshalb nicht gestellt wurde,
+  Verwerfen ist endgültig: der Vorschlag verschwindet und kommt nicht zurück, es sei denn, dieselbe
+  Stelle wird von Hand verknüpft. Die Zelle wird dann „anderswo beantwortet“. Wenn die Frage deshalb nicht gestellt wurde,
   die Checkbox **„Diese Frage habe ich deshalb weggelassen“** ankreuzen. Dann lautet der Status
   „weggelassen – schon beantwortet“.
 - **Begründung.** Die Schaltfläche **„Begründen“** öffnet den Dialog „Warum wurde diese Frage
@@ -158,7 +162,7 @@ begründen“** hat, braucht eine der beiden Angaben:
 die an anderer Stelle steht.
 
 **Erledigt:** Keine Leitfadenfrage hat mehr den Status „fehlt“. Solange welche offen sind, zeigt
-die Seite Ablauf „offen: …“ mit den Codes.
+die Seite Ablauf „fehlt – begründen: …“ mit den Codes.
 
 ## 7. Extrahieren
 
@@ -167,7 +171,8 @@ Im Dialog **„Extrakt anlegen“** wählst du die Leitfadenfrage und schreibst 
 eigenen Worten** (Pflichtfeld, höchstens 2000 Zeichen). Das Zitat bleibt im Transkript.
 
 Auf der Seite **„Auswertung“** kannst du Kernaussagen ändern („Kernaussage speichern“) und
-löschen. Vor dem Löschen fragt Interis nach („Extrakt löschen?“).
+löschen. Vor dem Löschen fragt Interis nach („Extrakt löschen?“). Kernaussagen zu Fragen, die
+aus dem Leitfaden entfernt wurden, stehen unten unter „Nicht mehr im Leitfaden“.
 
 **Warum:** Die Kernaussage je Frage und Gespräch ist das Ergebnis, das in die frühe Auswertung
 geht. Das Zitat belegt sie.

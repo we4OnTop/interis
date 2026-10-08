@@ -2,7 +2,9 @@ import { Fragment, useState, type DragEvent } from "react";
 import { LoaderIcon, PencilIcon } from "lucide-react";
 
 import { InterviewFilter } from "@/components/InterviewFilter";
+import { LoadError } from "@/components/LoadError";
 import { CellContent, PlayButton, StatusBadge, Time } from "@/components/review";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api, type AskedQuestion } from "@/lib/api";
 import { useCompare, useHidden, useStoredFlag } from "@/lib/compare";
@@ -19,7 +21,7 @@ const SPONTANEOUS = "__spontaneous__";
 export function ColumnsPage() {
   const { detail, interview } = useProject();
   const pid = detail!.project.id;
-  const { data, reload } = useCompare();
+  const { data, reload, error } = useCompare();
   const { hidden, toggle } = useHidden(pid);
   const [showSuggestions, setShowSuggestions] = useStoredFlag("interis.suggestions", true);
   const { notify, fail } = useFeedback();
@@ -49,6 +51,7 @@ export function ColumnsPage() {
         });
         notify(code ? `Frage ${code} zugeordnet` : "Als spontane Nachfrage eingeordnet");
       } else {
+        // only the fields the drop decides: an existing omitted flag and note stay as they are
         await api("POST", "/api/links", {
           interview: p.interview,
           turn: p.turn,
@@ -56,7 +59,7 @@ export function ColumnsPage() {
           last: p.last,
           guide_code: code,
           source: "manual",
-          omitted: false,
+          status: "confirmed",
         });
         notify(`Antwort auf ${code} verknüpft`);
       }
@@ -70,6 +73,8 @@ export function ColumnsPage() {
     return {
       onDragOver: (e: DragEvent<HTMLElement>) => {
         if (!e.dataTransfer.types.includes(DRAG_TYPE)) return;
+        // the spontaneous row takes questions only
+        if (code === null && !e.dataTransfer.types.includes(`${DRAG_TYPE}-question`)) return;
         e.preventDefault();
         setDrop(key);
       },
@@ -79,7 +84,8 @@ export function ColumnsPage() {
   };
   const dropClass = (code: string | null) => cn((code ?? SPONTANEOUS) === drop && "bg-question-soft ring-question ring-2 ring-inset");
 
-  if (!data) return <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
+  if (!data)
+    return error ? <LoadError message={error} onRetry={() => void reload()} /> : <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
   if (!data.guide || !data.interviews.length)
     return (
       <p className="text-muted-foreground p-4 sm:p-6 text-sm">
@@ -115,6 +121,11 @@ export function ColumnsPage() {
                     {iv && !iv.has_roles ? " · Rollen unklar" : ""}
                   </p>
                   {iv?.guide_mismatch && <p className="text-suggest text-xs">mit älterem Leitfaden analysiert</p>}
+                  {data.stale[id] && (
+                    <Badge variant="suggest" className="mt-1">
+                      Analyse veraltet
+                    </Badge>
+                  )}
                 </div>
               );
             })}
@@ -144,7 +155,7 @@ export function ColumnsPage() {
                     return (
                       <div key={id} className="min-w-0 space-y-2 border-r border-b p-3">
                         <div className="flex flex-wrap items-center gap-1">
-                          <StatusBadge status={cell.status} short />
+                          <StatusBadge status={cell.status} />
                           {cell.exchanges.map((ex, i) => (
                             <Time key={i} id={id} t={ex.start} />
                           ))}

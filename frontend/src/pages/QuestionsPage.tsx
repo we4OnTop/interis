@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { ChevronLeftIcon, ChevronRightIcon, FileTextIcon, LayoutGridIcon, LoaderIcon, MessageCircleQuestionIcon, PencilIcon } from "lucide-react";
 
 import { InterviewFilter } from "@/components/InterviewFilter";
+import { LoadError } from "@/components/LoadError";
 import { CellContent, PlayButton, StatusBadge, StatusDot, Time } from "@/components/review";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -19,7 +20,7 @@ const UNASSIGNED = "_ohne";
 export function QuestionsPage({ code }: { code: string | null }) {
   const { detail } = useProject();
   const pid = detail!.project.id;
-  const { data, reload } = useCompare();
+  const { data, reload, error } = useCompare();
   const { hidden, toggle } = useHidden(pid);
   const [showSuggestions, setShowSuggestions] = useStoredFlag("interis.suggestions", true);
 
@@ -37,7 +38,8 @@ export function QuestionsPage({ code }: { code: string | null }) {
     return () => window.removeEventListener("keydown", on);
   }, [index, questions, pid]);
 
-  if (!data) return <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
+  if (!data)
+    return error ? <LoadError message={error} onRetry={() => void reload()} /> : <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
   if (!data.guide) return <Empty pid={pid} what="guide" />;
   if (!data.interviews.length) return <Empty pid={pid} what="interviews" />;
 

@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import { CircleAlertIcon, CircleCheckIcon } from "lucide-react";
 
 import {
@@ -48,15 +48,19 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), error ? 8000 : 3500);
   }, []);
 
-  const value: Feedback = {
-    notify: (text) => push(text, false),
-    fail: (e) => push(e instanceof Error ? e.message : String(e), true),
-    confirm: (o) =>
-      new Promise<boolean>((resolve) => {
-        resolver.current = resolve;
-        setAsk(o);
-      }),
-  };
+  // stable identity: effects that depend on notify/fail must not re-run every time a toast is added
+  const value = useMemo<Feedback>(
+    () => ({
+      notify: (text) => push(text, false),
+      fail: (e) => push(e instanceof Error ? e.message : String(e), true),
+      confirm: (o) =>
+        new Promise<boolean>((resolve) => {
+          resolver.current = resolve;
+          setAsk(o);
+        }),
+    }),
+    [push],
+  );
 
   const close = (ok: boolean) => {
     setAsk(null);
