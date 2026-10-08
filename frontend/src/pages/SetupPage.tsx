@@ -1,4 +1,4 @@
-import { BookOpenTextIcon, MicIcon, SettingsIcon } from "lucide-react";
+import { AudioLinesIcon, BookOpenTextIcon, MicIcon, SettingsIcon } from "lucide-react";
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useProject } from "@/lib/project";
@@ -7,6 +7,7 @@ import { href, navigate } from "@/lib/router";
 import { GuideTab } from "./setup/GuideTab";
 import { InterviewsTab } from "./setup/InterviewsTab";
 import { SettingsTab } from "./setup/SettingsTab";
+import { TranscriptionTab } from "./setup/TranscriptionTab";
 
 export function SetupPage({ tab }: { tab: string | null }) {
   const { detail } = useProject();
@@ -24,6 +25,10 @@ export function SetupPage({ tab }: { tab: string | null }) {
             <BookOpenTextIcon />
             Leitfaden {detail!.guide ? `(${detail!.guide.questions.length})` : ""}
           </TabsTrigger>
+          <TabsTrigger value="transcription">
+            <AudioLinesIcon />
+            Transkription
+          </TabsTrigger>
           <TabsTrigger value="settings">
             <SettingsIcon />
             Einstellungen
@@ -34,6 +39,9 @@ export function SetupPage({ tab }: { tab: string | null }) {
         </TabsContent>
         <TabsContent value="guide">
           <GuideTab key={detail!.guide_text} />
+        </TabsContent>
+        <TabsContent value="transcription">
+          <TranscriptionTab />
         </TabsContent>
         <TabsContent value="settings">
           <SettingsTab key={`${detail!.project.name}|${detail!.project.hotwords}|${detail!.project.smoothing_tags ?? ""}`} />

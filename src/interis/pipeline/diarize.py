@@ -35,7 +35,8 @@ def _spans(annotation: Any) -> list[SpeakerSpan]:
 
 
 def diarize(audio: np.ndarray, model_dir: Path, num_speakers: int | None = 2,
-            progress: Progress | None = None) -> Diarization:
+            progress: Progress | None = None,
+            min_duration_off: float | None = None) -> Diarization:
     require_offline()
     for ckpt in sorted(model_dir.rglob("*.bin")):
         assert_safe_checkpoint(ckpt)
@@ -49,6 +50,10 @@ def diarize(audio: np.ndarray, model_dir: Path, num_speakers: int | None = 2,
     if pipeline is None:
         raise RuntimeError(f"pyannote could not load the pipeline from {model_dir}")
     pipeline.to(torch.device("cpu"))
+    if min_duration_off is not None:  # pauses of one speaker shorter than this are bridged
+        params = pipeline.parameters(instantiated=True)
+        params["segmentation"]["min_duration_off"] = float(min_duration_off)
+        pipeline.instantiate(params)
 
     def hook(step_name: str, _artifact: Any, file: Any = None, total: int | None = None,
              completed: int | None = None) -> None:

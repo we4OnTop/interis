@@ -28,12 +28,58 @@ export interface Job {
   kind: "transcribe" | "analyze";
   interview_id: string;
   status: "queued" | "running" | "done" | "failed" | "cancelled";
-  options: { model?: string; room_mic?: boolean };
+  options: Partial<TranscriptionSettings> & { preset?: string };
   stage: string;
   progress: number;
   message: string;
   started_at: string | null;
   queue_pos: number | null;
+}
+
+export interface TranscriptionSettings {
+  model: string;
+  compute_type: "int8" | "float32";
+  beam_size: number;
+  room_mic: boolean;
+  /** null: automatic (0.5, with room_mic 0.35) */
+  vad_threshold: number | null;
+  /** 0: detect the number */
+  speakers: number;
+  /** seconds; null: the model's setting */
+  min_duration_off: number | null;
+}
+
+export interface Preset {
+  id: number;
+  name: string;
+  options: TranscriptionSettings;
+  is_default: boolean;
+}
+
+export interface SettingsInfo {
+  builtin: TranscriptionSettings;
+  presets: Preset[];
+  models: string[];
+  default: TranscriptionSettings & { preset: string };
+}
+
+export interface Trial {
+  id: number;
+  status: Job["status"];
+  stage: string;
+  progress: number;
+  message: string;
+  options: TranscriptionSettings & { interview: string; start: number; duration: number; label: string };
+  started_at: string | null;
+  elapsed_s: number | null;
+  has_result: boolean;
+}
+
+export interface TrialResult {
+  clip: { start_s: number; duration_s: number } | null;
+  duration_s: number;
+  speakers: { label: string; role: string }[];
+  turns: { speaker: string | null; start: number; end: number; words: { text: string; start: number; prob: number }[] }[];
 }
 
 export interface Part {

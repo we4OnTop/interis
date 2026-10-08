@@ -211,10 +211,11 @@ def test_upload_parts_and_start_transcription(client, data_dir):
                       json={"order": [0]}).status_code == 422
 
     r = client.post("/api/interviews/I01/transcribe", headers=H,
-                    json={"model": "whisper-large-v3-turbo"})
+                    json={"settings": {"model": "whisper-large-v3-turbo"}, "preset": "P"})
     job = store.job(r.json()["job"])
     assert job["kind"] == "transcribe"
-    assert job["options"] == {"model": "whisper-large-v3-turbo", "room_mic": False}
+    assert job["options"]["model"] == "whisper-large-v3-turbo"
+    assert job["options"]["preset"] == "P" and job["options"]["speakers"] == 2
     # no changes while the job is pending
     assert client.post("/api/interviews/I01/parts?ext=wav", headers=H,
                        content=b"x").status_code == 409
@@ -346,7 +347,7 @@ def test_job_command_uses_project_guide_and_hotwords(data_dir):
     runner = JobRunner(data_dir, store, lambda _i: guide, lambda _i: "Müller SAP")
     cmd = runner.command(store.job(store.add_job("transcribe", "I01",
                                                  {"model": "whisper-large-v3-turbo"})))
-    assert cmd[cmd.index("transcribe") + 1:cmd.index("--id")] == [str(audio), str(audio)]
+    assert cmd[cmd.index("transcribe") + 1:cmd.index("--progress-json")] == [str(audio)] * 2
     assert cmd[:4] == [sys.executable, "-I", "-m", "interis.cli"]  # isolated child
     assert cmd[cmd.index("--id") + 1] == "I01"
     assert cmd[cmd.index("--guide") + 1] == str(guide)

@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS audio_parts (
 -- Transcriptions / re-analyses started from the website, run one at a time.
 CREATE TABLE IF NOT EXISTS jobs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind         TEXT NOT NULL CHECK (kind IN ('transcribe', 'analyze', 'models')),
+    kind         TEXT NOT NULL CHECK (kind IN ('transcribe', 'analyze', 'models', 'trial')),
     interview_id TEXT NOT NULL,
     options      TEXT NOT NULL DEFAULT '{}',
     status       TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed',
@@ -112,6 +112,14 @@ CREATE TABLE IF NOT EXISTS question_decisions (
     updated_at   TEXT NOT NULL,
     PRIMARY KEY (interview_id, guide_code)
 );
+-- Saved transcription settings ("Einstellungen"), for all projects. At most one is the
+-- default; without one, the built-in settings are used.
+CREATE TABLE IF NOT EXISTS asr_presets (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    options     TEXT NOT NULL,
+    is_default  INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -130,7 +138,7 @@ class Store:
         with self._conn() as c:
             c.executescript(SCHEMA)
             sql = c.execute("SELECT sql FROM sqlite_master WHERE name = 'jobs'").fetchone()
-            if sql and "'models'" not in sql["sql"]:  # databases from before model jobs
+            if sql and "'trial'" not in sql["sql"]:  # databases from before trial runs
                 c.execute("ALTER TABLE jobs RENAME TO jobs_old")
                 c.executescript(SCHEMA)
                 c.execute("INSERT INTO jobs SELECT * FROM jobs_old")
@@ -470,6 +478,39 @@ class Store:
         with self._conn() as c:
             c.execute(f"UPDATE jobs SET {cols} WHERE id = ?",  # noqa: S608
                       (*fields.values(), job_id))
+
+    def delete_job(self, job_id: int) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
+    # ---------------------------------------------------------------- settings
+    def presets(self) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM asr_presets ORDER BY name").fetchall()
+        return [{"id": r["id"], "name": r["name"], "options": json.loads(r["options"]),
+                 "is_default": bool(r["is_default"])} for r in rows]
+
+    def save_preset(self, name: str, options: dict[str, Any], preset_id: int | None = None,
+                    ) -> int:
+        """New preset, or replace name and options of ``preset_id``. Raises
+        sqlite3.IntegrityError if the name is taken."""
+        with self._conn() as c:
+            if preset_id is None:
+                cur = c.execute("INSERT INTO asr_presets (name, options) VALUES (?, ?)",
+                                (name, json.dumps(options)))
+                return int(cur.lastrowid)
+            c.execute("UPDATE asr_presets SET name = ?, options = ? WHERE id = ?",
+                      (name, json.dumps(options), preset_id))
+        return preset_id
+
+    def delete_preset(self, preset_id: int) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM asr_presets WHERE id = ?", (preset_id,))
+
+    def set_default_preset(self, preset_id: int | None) -> None:
+        """``None``: the built-in settings are the default again."""
+        with self._conn() as c:
+            c.execute("UPDATE asr_presets SET is_default = (id IS ?)", (preset_id,))
 
     def requeue_interrupted_jobs(self) -> None:
         """Jobs that were running when the server stopped continue (their finished steps

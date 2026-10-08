@@ -243,10 +243,13 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
         asr_model=args.model,
         asr=AsrOptions(compute_type=args.compute_type, beam_size=args.beam_size,
                        hotwords=args.hotwords, initial_prompt=args.initial_prompt,
-                       threads=args.threads, room_mic=args.room_mic),
+                       threads=args.threads, room_mic=args.room_mic,
+                       vad_threshold=args.vad_threshold),
         align=not args.no_align,
         diarize=not args.no_diarize,
         num_speakers=args.speakers or None,
+        min_duration_off=args.min_duration_off,
+        clip=(args.start, args.duration) if args.duration else None,
         interview_id=args.id,
         analysis=_analysis_options(args, paths, redo_roles=True),
     )
@@ -254,10 +257,16 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
     try:
         progress = _progress_json() if args.progress_json else _progress_printer()
         transcript = run_pipeline(audio, paths, opts, progress)
-    except ModelError as e:
+    except (ModelError, ValueError) as e:
         print(f"\nERROR: {e}", file=sys.stderr)
         return 1
     print()
+    if args.out:  # a trial run: only this file, the interview itself is not touched
+        from interis.export import write_json
+
+        write_json(transcript, Path(args.out))
+        print(f"Done in {(time.monotonic() - started) / 60:.1f} min. Output: {args.out}")
+        return 0
 
     out_dir = paths.exports / transcript.meta["interview_id"]
     _write_outputs(transcript, out_dir, args.formats)
@@ -311,6 +320,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--room-mic", action="store_true",
                    help="one room microphone, one speaker much quieter: even out loudness "
                         "and detect quiet speech (measure it with bench/wer.py)")
+    p.add_argument("--vad-threshold", type=float,
+                   help="speech detector, 0.1–0.9: lower finds quieter speech "
+                        "(default 0.5, 0.35 with --room-mic)")
+    p.add_argument("--min-duration-off", type=float,
+                   help="speaker diarization: bridge pauses of one speaker shorter than this "
+                        "(seconds, default: the model's setting)")
+    p.add_argument("--start", type=float, default=0.0, help="excerpt: start in seconds")
+    p.add_argument("--duration", type=float, help="excerpt: length in seconds (default: all)")
+    p.add_argument("--out", help="trial run: write only this JSON file; the interview, its "
+                                 "exports and markings are not touched")
     p.add_argument("--threads", type=int, help="CPU threads (default: all)")
     p.add_argument("--no-align", action="store_true", help="skip word alignment")
     p.add_argument("--no-diarize", action="store_true", help="skip speaker diarization")

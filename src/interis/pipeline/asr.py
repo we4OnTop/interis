@@ -38,12 +38,23 @@ class AsrOptions:
     threads: int | None = None
     language: str = "de"  # interviews are German; other values only for benchmarks
     room_mic: bool = False
+    vad_threshold: float | None = None  # speech detector; None: 0.35 with room_mic, else 0.5
 
     def as_params(self) -> dict:
         params = dict(self.__dict__, threads=None)  # thread count does not change results
+        # options left at their default are not part of the key, so the cache keys of
+        # earlier transcripts stay valid
         if not self.room_mic:
-            del params["room_mic"]  # keeps the cache keys of earlier transcripts valid
+            del params["room_mic"]
+        if self.vad_threshold is None:
+            del params["vad_threshold"]
         return params
+
+    @property
+    def vad(self) -> float:
+        if self.vad_threshold is not None:
+            return self.vad_threshold
+        return 0.35 if self.room_mic else 0.5
 
 
 def level(audio: np.ndarray, window_s: float = 0.4, target_db: float = -20.0,
@@ -87,7 +98,7 @@ def transcribe(audio: np.ndarray, model_dir: Path, opts: AsrOptions,
         condition_on_previous_text=False,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500,
-                        "threshold": 0.35 if opts.room_mic else 0.5},
+                        "threshold": opts.vad},
         word_timestamps=True,
         hotwords=opts.hotwords or None,
         initial_prompt=opts.initial_prompt or None,

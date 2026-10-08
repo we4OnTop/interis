@@ -67,6 +67,13 @@ from interis.web.review import (
 )
 from interis.web.store import Store
 from interis.web.system import add_system_routes
+from interis.web.transcription import (
+    SHA256_HEX,
+    TranscriptionSettings,
+    add_transcription_routes,
+    default_settings,
+    remove_trials,
+)
 from interis.web.workflow import workflow_state
 
 INTERVIEW_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
@@ -76,7 +83,6 @@ MAX_AUDIO_BYTES = 8 * 1024**3
 MAX_DOCX_BYTES = 20 * 1024**2
 # A .docx is a zip: its parts must stay small after decompression too (zip bomb).
 MAX_DOCX_UNPACKED = 50 * 1024**2
-SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 MAX_GUIDE_CHARS = 200_000
 LEGACY_PROJECT = "Bestehende Interviews"
 
@@ -183,8 +189,9 @@ class InterviewCreate(BaseModel):
 
 
 class TranscribeRequest(BaseModel):
-    model: str = Field(default="whisper-large-v3", max_length=60)
-    room_mic: bool = False
+    # None: the default settings (see "Transkription" in the website)
+    settings: TranscriptionSettings | None = None
+    preset: str = Field(default="", max_length=60)  # only shown with the job
     # Re-transcribing changes all word positions, so earlier markings would point to
     # the wrong words. They are removed – only after the user confirmed it.
     discard_markings: bool = False
@@ -392,6 +399,8 @@ def create_app(paths: Paths, login_token: str, port: int,
         if pid is None:
             raise HTTPException(404, "unknown interview")
         return pid
+
+    add_transcription_routes(app, paths, store, runner, _interview_in_project)
 
     def _has_work(interview: str) -> bool:
         """Anything a person did on this interview that word positions would break."""
@@ -666,8 +675,8 @@ def create_app(paths: Paths, login_token: str, port: int,
     @app.post("/api/interviews/{interview}/transcribe")
     def start_transcription(interview: str, body: TranscribeRequest) -> dict[str, int]:
         _interview_in_project(interview)
-        if body.model not in ASR_MODELS:
-            raise HTTPException(422, "unknown model")
+        options = ({**body.settings.checked(), "preset": body.preset}
+                   if body.settings else default_settings(store))
         parts = store.parts(interview)
         if not parts:
             raise HTTPException(422, "Noch keine Aufnahme hochgeladen")
@@ -680,8 +689,7 @@ def create_app(paths: Paths, login_token: str, port: int,
             if ((paths.exports / interview / f"{interview}.json").is_file()
                     and _has_work(interview) and not body.discard_markings):
                 raise HTTPException(409, "Neu transkribieren entfernt deine Markierungen")
-            job_id = store.add_job("transcribe", interview,
-                                   {"model": body.model, "room_mic": body.room_mic})
+            job_id = store.add_job("transcribe", interview, options)
         runner.notify()
         return {"job": job_id}
 
@@ -943,6 +951,7 @@ def create_app(paths: Paths, login_token: str, port: int,
             shutil.rmtree(exports)
         for part in parts:
             _remove_upload(part["path"])
+        remove_trials(paths, store, interview)
         store.delete_interview(interview)
         return {"ok": True}
 

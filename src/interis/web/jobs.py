@@ -29,6 +29,25 @@ from interis.web.store import Store
 
 POLL_S = 1.0
 
+# Transcription settings (a job's options) and their command line flags.
+SETTING_FLAGS = {"model": "--model", "compute_type": "--compute-type",
+                 "beam_size": "--beam-size", "vad_threshold": "--vad-threshold",
+                 "speakers": "--speakers", "min_duration_off": "--min-duration-off"}
+
+
+def settings_args(options: dict) -> list[str]:
+    args = ["--model", "whisper-large-v3"] if "model" not in options else []
+    for key, flag in SETTING_FLAGS.items():
+        if options.get(key) is not None:
+            args += [flag, str(options[key])]
+    if options.get("room_mic") is True:
+        args.append("--room-mic")
+    return args
+
+
+def trial_file(paths: Paths, job_id: int) -> Path:
+    return paths.root / "trials" / f"{int(job_id)}.json"
+
 
 def job_message(text: str) -> str:
     """First line of a message for the UI, with file paths reduced to their file names.
@@ -105,20 +124,26 @@ class JobRunner:
         if job["kind"] == "models":
             # The only job that uses the network: download + verify the pinned models.
             return [*base, "setup-models", "--allow-verified-mirror", "--progress-json"]
+        options = job["options"]
+        if job["kind"] == "trial":  # an excerpt with other settings; touches no interview
+            iid = str(options["interview"])
         guide = self.guide_file(iid)
         guide_args = ["--guide", str(guide)] if guide else []
-        if job["kind"] == "transcribe":
+        if job["kind"] in ("transcribe", "trial"):
             audio = self.store.part_paths(iid)
             missing = [p.name for p in audio if not p.is_file()]
             if not audio or missing:
                 raise RuntimeError("Audiodatei nicht gefunden: " + ", ".join(missing))
-            cmd = [*base, "transcribe", *map(str, audio), "--id", iid, "--progress-json",
-                   "--model", job["options"].get("model", "whisper-large-v3"), *guide_args]
+            cmd = [*base, "transcribe", *map(str, audio), "--progress-json",
+                   *settings_args(options)]
             if hotwords := self.hotwords(iid):
                 cmd += ["--hotwords", hotwords]
-            if job["options"].get("room_mic") is True:
-                cmd.append("--room-mic")
-            return cmd
+            if job["kind"] == "trial":
+                out = trial_file(self.paths, job["id"])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                return [*cmd, "--id", "PROBE", "--start", str(float(options["start"])),
+                        "--duration", str(float(options["duration"])), "--out", str(out)]
+            return [*cmd, "--id", iid, *guide_args]
         transcript = self.paths.exports / iid / f"{iid}.json"
         if not transcript.is_file():
             raise RuntimeError("Transkript nicht gefunden")

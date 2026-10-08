@@ -7,6 +7,7 @@ result is reproducible and can be documented in the thesis methods section.
 
 from __future__ import annotations
 
+import hashlib
 import platform
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -47,6 +48,10 @@ class PipelineOptions:
     align: bool = True
     diarize: bool = True
     num_speakers: int | None = 2
+    # bridge pauses of one speaker shorter than this (seconds); None: the model's setting
+    min_duration_off: float | None = None
+    # (start, length) in seconds: transcribe only this excerpt, e.g. to compare settings
+    clip: tuple[float, float] | None = None
     interview_id: str | None = None
     analysis: AnalysisOptions = field(default_factory=AnalysisOptions)
 
@@ -89,6 +94,17 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
         offset += len(x) / SAMPLE_RATE
         say("decode", (i + 1) / len(files))
     audio = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+    boundaries = [p["offset_s"] for p in parts[1:]]
+    clip = None
+    if opts.clip:
+        start, length = opts.clip
+        audio = audio[int(start * SAMPLE_RATE):int((start + length) * SAMPLE_RATE)]
+        if len(audio) < SAMPLE_RATE:
+            raise ValueError("the excerpt lies outside the recording")
+        clip = {"start_s": start, "duration_s": round(len(audio) / SAMPLE_RATE, 2)}
+        boundaries = [b - start for b in boundaries if start < b < start + length]
+        audio_sha = hashlib.sha256(f"{audio_sha}:clip:{start}:{length}".encode()).hexdigest()
+        cache = StepCache(paths.cache, audio_sha)
     duration = len(audio) / SAMPLE_RATE
 
     # --- transcribe
@@ -124,21 +140,27 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
     # --- diarize
     diarization: Diarization | None = None
     if opts.diarize:
-        diar_key = params_key({"revision": MODELS[DIARIZATION_MODEL].revision,
-                               "num_speakers": opts.num_speakers,
-                               "pyannote": version("pyannote.audio")})
+        diar_params = {"revision": MODELS[DIARIZATION_MODEL].revision,
+                       "num_speakers": opts.num_speakers, "pyannote": version("pyannote.audio")}
+        if opts.asr.room_mic:  # (only set options are keyed: earlier caches stay valid)
+            diar_params["room_mic"] = True
+        if opts.min_duration_off is not None:
+            diar_params["min_duration_off"] = opts.min_duration_off
+        diar_key = params_key(diar_params)
         cached = cache.load("diarize", diar_key)
         if cached is None:
+            from interis.pipeline.asr import level
             from interis.pipeline.diarize import diarize
 
             model_dir = verify_ready(paths, DIARIZATION_MODEL)
-            diarization = diarize(audio, model_dir, opts.num_speakers, say)
+            diarization = diarize(level(audio) if opts.asr.room_mic else audio, model_dir,
+                                  opts.num_speakers, say, opts.min_duration_off)
             cache.save("diarize", diar_key, to_dict(diarization))
         else:
             diarization = Diarization.from_dict(cached)
             say("diarize", 1.0)
 
-    turns = build_turns(segments, diarization, [p["offset_s"] for p in parts[1:]])
+    turns = build_turns(segments, diarization, boundaries)
     labels = sorted({t.speaker for t in turns if t.speaker is not None})
     speakers = [
         {"label": label, "role": "unknown", "display_name": label,
@@ -154,13 +176,15 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
         "note": "Raw machine transcript – not reviewed.",
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "interis_version": interis.__version__,
-        "audio": {"sha256": audio_sha, "duration_s": round(duration, 2), "parts": parts},
+        "audio": {"sha256": audio_sha, "duration_s": round(duration, 2), "parts": parts,
+                  **({"clip": clip} if clip else {})},
         "language": "de",
         "models": {k: {"repo": MODELS[k].repo, "revision": MODELS[k].revision,
                        "license": MODELS[k].license} for k in used},
         "options": {
             "asr_model": opts.asr_model, **opts.asr.as_params(),
             "align": opts.align, "diarize": opts.diarize, "num_speakers": opts.num_speakers,
+            "min_duration_off": opts.min_duration_off, "vad_threshold": opts.asr.vad,
             "condition_on_previous_text": False, "vad_filter": True, "language": "de",
         },
         "packages": {p: version(p) for p in _PACKAGES},

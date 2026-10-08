@@ -107,6 +107,7 @@ function JobStatus({ iv }: { iv: InterviewRow }) {
             {STAGE_LABEL[key] ?? key}
           </span>
           {j.progress > 0 && j.progress < 1 && <span className="text-muted-foreground">{Math.round(j.progress * 100)} %</span>}
+          {j.options.preset && <span className="text-muted-foreground text-xs">({j.options.preset})</span>}
           {j.started_at && (
             <span className="text-muted-foreground ml-auto text-xs">
               seit {new Date(j.started_at).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}
@@ -159,10 +160,8 @@ function InterviewCard({ iv }: { iv: InterviewRow }) {
   };
 
   const start = async () => {
-    const model = (j?.kind === "transcribe" && j.options.model) || "whisper-large-v3";
-    const room_mic = j?.kind === "transcribe" && j.options.room_mic === true;
     try {
-      await api("POST", `/api/interviews/${enc(iv.id)}/transcribe`, { model, room_mic });
+      await api("POST", `/api/interviews/${enc(iv.id)}/transcribe`, {});
       notify(`${iv.id}: Transkription eingereiht`);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409 && iv.transcribed) {
@@ -173,7 +172,7 @@ function InterviewCard({ iv }: { iv: InterviewRow }) {
           confirm: "Neu transkribieren",
           destructive: true,
         });
-        if (ok) await run(() => api("POST", `/api/interviews/${enc(iv.id)}/transcribe`, { model, room_mic, discard_markings: true }), `${iv.id}: Transkription eingereiht`);
+        if (ok) await run(() => api("POST", `/api/interviews/${enc(iv.id)}/transcribe`, { discard_markings: true }), `${iv.id}: Transkription eingereiht`);
         return;
       }
       fail(e);

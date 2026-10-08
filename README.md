@@ -84,6 +84,10 @@ uv run interis transcribe "X:\interis-data\audio\interview01.m4a" --id I01
 | `--compute-type float32` | maximale Genauigkeit, langsamer (Standard `int8`) |
 | `--hotwords "Name1 Fachbegriff"` | Glossar für die richtige Schreibweise von Namen/Begriffen |
 | `--room-mic` | ein Mikrofon im Raum: gleicht leise/laute Stimmen an, erkennt leise Sprache besser |
+| `--beam-size 1…10` | Suchbreite; 1 = am schnellsten, 5 = Standard |
+| `--vad-threshold 0.1…0.9` | Sprach-Empfindlichkeit; niedriger findet leisere Sprache |
+| `--min-duration-off 0…2` | Sprechertrennung: kürzere Pausen eines Sprechers überbrücken (Sekunden) |
+| `--start 300 --duration 180 --out probe.json` | nur einen Ausschnitt, Ergebnis nur in diese Datei |
 | `--speakers 2` | Anzahl der Sprecher (Standard 2; `0` = automatisch) |
 | `--no-diarize` / `--no-align` | Sprechertrennung / Wort-Alignment überspringen |
 
@@ -104,8 +108,12 @@ Hall und Abstand kosten mehr Genauigkeit als jede Einstellung. In dieser Reihenf
 2. **Glossar** (Projekt-Einstellungen): Namen und Fachbegriffe, die im Gespräch fallen
    (z. B. `Miro Figma Wireframe Mockup Klickdummy Prototyp Anforderungserhebung`). Kurz
    halten, nur Begriffe, keine Sätze.
-3. **„Ein Mikrofon im Raum“** beim Hinzufügen des Gesprächs (CLI: `--room-mic`).
-4. **Messen statt raten:** 3–5 Minuten selbst abtippen und die Varianten vergleichen, siehe
+3. **„Ein Mikrofon im Raum“** im Reiter „Transkription“ (CLI: `--room-mic`).
+4. **Probelauf:** Im Reiter „Transkription“ einen Ausschnitt (1–10 min) mit verschiedenen
+   Einstellungen transkribieren und zwei Ergebnisse nebeneinander vergleichen (Text,
+   Sprecher, unsichere Wörter, Rechenzeit). Gute Einstellungen speichern und mit ★ für alle
+   neuen Transkriptionen festlegen. Das Gespräch selbst bleibt dabei unverändert.
+5. **Messen statt raten:** 3–5 Minuten selbst abtippen und die Varianten vergleichen, siehe
    `bench/wer.py`. „fehlend“ hoch = leise Sprache verloren, „falsch“ hoch = undeutlich oder
    unbekannte Begriffe.
 
