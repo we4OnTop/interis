@@ -110,7 +110,14 @@ export function TranscriptionTab() {
   const loadTrials = useCallback(async () => {
     const ids = new Set(detail!.interviews.map((i) => i.id));
     const all = await api<Trial[]>("GET", "/api/trials");
-    setTrials(all.filter((t) => ids.has(t.options.interview)));
+    const mine = all.filter((t) => ids.has(t.options.interview));
+    setTrials(mine);
+    // nothing shown yet: open the newest finished result
+    setCompare((c) => {
+      const kept = c.filter((id) => mine.some((t) => t.id === id && t.has_result));
+      const newest = mine.find((t) => t.has_result);
+      return kept.length || !newest ? kept : [newest.id];
+    });
   }, [detail]);
 
   useEffect(() => {
@@ -467,7 +474,7 @@ export function TranscriptionTab() {
         <Card className="gap-4">
           <CardHeader>
             <CardTitle>Ergebnisse</CardTitle>
-            <CardDescription>Bis zu zwei Ergebnisse anhaken, um sie nebeneinander zu sehen. Gelb = unsicher erkanntes Wort.</CardDescription>
+            <CardDescription>„Ansehen“ zeigt ein Ergebnis unten an; ein zweites dazunehmen, um beide nebeneinander zu vergleichen. Gelb = unsicher erkanntes Wort.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <ul className="divide-y rounded-md border">
@@ -522,7 +529,16 @@ function TrialRow({
   const act = (fn: () => Promise<unknown>) => fn().then(onChanged).catch(fail);
   return (
     <li className="flex flex-wrap items-center gap-3 px-3 py-2 text-sm">
-      <Checkbox checked={checked} disabled={!t.has_result} onCheckedChange={onCheck} />
+      <Button
+        size="sm"
+        variant={checked ? "secondary" : "outline"}
+        disabled={!t.has_result}
+        aria-pressed={checked}
+        onClick={onCheck}
+        title={t.has_result ? undefined : "Erst wenn der Probelauf fertig ist"}
+      >
+        {checked ? "Angezeigt ✓" : "Ansehen"}
+      </Button>
       <span className="font-mono text-xs">{t.options.interview}</span>
       <span className="text-muted-foreground text-xs">
         {clock(t.options.start)}–{clock(t.options.start + t.options.duration)}
