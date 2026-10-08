@@ -18,7 +18,14 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    // during development the API runs at `interis serve --port 8765`
-    proxy: { "/api": { target: "http://127.0.0.1:8765", changeOrigin: false } },
+    // during development the API runs at `interis serve --port 8765 --no-browser`. The backend
+    // accepts writes only from its own origin, so the dev proxy presents that origin.
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:8765",
+        changeOrigin: false,
+        headers: { origin: "http://127.0.0.1:8765" },
+      },
+    },
   },
 });

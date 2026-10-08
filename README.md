@@ -230,6 +230,24 @@ npm run dev       # Entwicklungsserver auf :5173 (API von `interis serve` auf :8
 npm run build     # schreibt nach src/interis/web/dist (wird mit eingecheckt)
 ```
 
+Mit Live-Reload arbeiten (zwei Terminals):
+
+```powershell
+# Terminal 1: Backend (API auf :8765)
+uv sync --locked
+uv run interis serve --no-browser
+# gibt einen Link aus: http://127.0.0.1:8765/#login=<TOKEN>
+
+# Terminal 2: Oberfläche (Vite auf :5173, leitet /api an :8765 weiter)
+cd frontend
+npm run dev
+```
+
+Dann im Browser `http://localhost:5173/#login=<TOKEN>` öffnen, also den Link aus Terminal 1
+mit Port **5173** statt 8765. Änderungen in `frontend/src` erscheinen sofort; nach Änderungen
+am Python-Code `interis serve` neu starten (das gibt auch einen neuen Token). Ohne Live-Reload
+reicht `npm run build` und der Link aus Terminal 1 direkt.
+
 ```powershell
 uv run pytest                 # Tests
 uv run ruff check src tests   # Linter
