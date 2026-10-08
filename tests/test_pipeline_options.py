@@ -70,3 +70,33 @@ def test_wpe_removes_a_predictable_echo():
         y[t] += 0.7 * y[t - 5] + 0.2 * y[t - 8]
     x = wpe(y.astype(np.complex64), taps=10, delay=3, iterations=3)
     assert np.mean(np.abs(x - source) ** 2) < 0.01 * np.mean(np.abs(y - source) ** 2)
+
+
+def test_trial_steps_write_every_stage_and_result(tmp_path, monkeypatch):
+    import json
+    import wave
+
+    heard: list = []
+    _stub(monkeypatch, heard)
+    monkeypatch.setattr(dereverb_mod, "dereverb", lambda x, *a, progress=None: x * 0.5)
+    paths = Paths(tmp_path)
+    paths.ensure()
+    f = tmp_path / "a.wav"
+    f.write_bytes(b"x")
+    steps = tmp_path / "trial"
+    from interis.pipeline.asr import AsrOptions
+
+    opts = run_mod.PipelineOptions(align=False, diarize=False, clip=(0.0, 3.0),
+                                   dereverb=(10, 3, 3), asr=AsrOptions(room_mic=True),
+                                   sentence_level=True, steps_dir=steps)
+    t = run_mod.run_pipeline(f, paths, opts)
+    assert t.meta["options"]["speaker_per_sentence"] is True
+    data = json.loads((steps / "steps.json").read_text(encoding="utf-8"))
+    names = [a["file"] for a in data["audio"]]
+    assert names == ["01-original.wav", "02-hall-reduziert.wav", "03-angeglichen.wav"]
+    assert data["heard_by_models"] == "03-angeglichen.wav"
+    assert {"dereverb", "transcribe", "analyze"} <= set(data["seconds"])
+    assert data["recognised"][0]["text"] == "Hallo" and data["diarization"] == []
+    for name in names:
+        with wave.open(str(steps / name)) as w:
+            assert (w.getframerate(), w.getnchannels(), w.getnframes()) == (SR, 1, 3 * SR)

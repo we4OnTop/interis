@@ -17,13 +17,15 @@ from datetime import datetime
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from interis.config import Paths
 from interis.models import ASR_MODELS
-from interis.web.jobs import trial_file
+from interis.web.jobs import trial_file, trial_steps
 
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+STAGE_WAV = re.compile(r"^\d\d-[a-z-]+\.wav$")
 MAX_TRIAL_S = 600
 
 
@@ -35,6 +37,7 @@ class TranscriptionSettings(BaseModel):
     vad_threshold: float | None = Field(default=None, ge=0.1, le=0.9)
     speakers: int = Field(default=2, ge=0, le=8)  # 0: detect the number
     min_duration_off: float | None = Field(default=None, ge=0.0, le=2.0)
+    sentence_level: bool = False  # one speaker per sentence, see pipeline.merge
     dereverb: bool = False  # WPE, see interis.pipeline.dereverb
     wpe_taps: int = Field(default=10, ge=3, le=40)
     wpe_delay: int = Field(default=3, ge=1, le=8)
@@ -92,6 +95,9 @@ def _remove_trial(paths: Paths, store, job: dict[str, Any]) -> None:
         if SHA256_HEX.match(sha) and cache.parent == paths.cache and cache.is_dir():
             shutil.rmtree(cache)
         out.unlink()
+    steps = trial_steps(paths, job["id"])
+    if steps.is_dir():
+        shutil.rmtree(steps)
     store.delete_job(job["id"])
 
 
@@ -182,7 +188,18 @@ def add_transcription_routes(app: FastAPI, paths: Paths, store, runner,
         out = trial_file(paths, job_id)
         if job is None or job["kind"] != "trial" or not out.is_file():
             raise HTTPException(404, "no result")
-        return _words(json.loads(out.read_text(encoding="utf-8")))
+        steps = trial_steps(paths, job_id) / "steps.json"
+        return {**_words(json.loads(out.read_text(encoding="utf-8"))),
+                "steps": json.loads(steps.read_text(encoding="utf-8"))
+                if steps.is_file() else None}
+
+    @app.get("/api/trials/{job_id}/audio/{name}")
+    def trial_audio(job_id: int, name: str) -> FileResponse:
+        """One processing stage of a trial as WAV (names as in its steps.json)."""
+        path = trial_steps(paths, job_id) / name
+        if not STAGE_WAV.match(name) or not path.is_file():
+            raise HTTPException(404, "no such stage")
+        return FileResponse(path, media_type="audio/wav")
 
     @app.delete("/api/trials/{job_id}")
     def delete_trial(job_id: int) -> dict[str, bool]:

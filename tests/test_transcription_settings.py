@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from interis.config import Paths
 from interis.web.app import create_app
-from interis.web.jobs import JobRunner, settings_args, trial_file
+from interis.web.jobs import JobRunner, settings_args, trial_file, trial_steps
 from interis.web.store import Store
 
 BASE = "http://127.0.0.1:8765"
@@ -65,6 +65,7 @@ def test_trial_runs_on_an_excerpt_without_touching_the_interview(tmp_path):
     assert cmd[cmd.index("--start") + 1] == "60.0" and cmd[cmd.index("--duration") + 1] == "120.0"
     assert cmd[cmd.index("--out") + 1] == str(trial_file(paths, job["id"]))
     assert cmd[cmd.index("--beam-size") + 1] == "1" and "--guide" not in cmd
+    assert cmd[cmd.index("--steps-dir") + 1] == str(trial_steps(paths, job["id"]))
 
     # the interview stays editable and shows no job while the trial waits
     detail = c.get("/api/projects/1").json()
@@ -90,8 +91,17 @@ def test_trial_runs_on_an_excerpt_without_touching_the_interview(tmp_path):
     result = c.get(f"/api/trials/{job['id']}").json()
     assert result["turns"][0]["words"][0] == {"text": " Hallo", "start": 0.0, "prob": 0.4}
     assert result["speakers"] == [{"label": "SPEAKER_00", "role": "interviewer"}]
+    steps = trial_steps(paths, job["id"])
+    steps.mkdir()
+    (steps / "01-original.wav").write_bytes(b"RIFF")
+    (steps / "steps.json").write_text(json.dumps({"seconds": {"transcribe": 3.2}}),
+                                      encoding="utf-8")
+    assert c.get(f"/api/trials/{job['id']}").json()["steps"]["seconds"]["transcribe"] == 3.2
+    assert c.get(f"/api/trials/{job['id']}/audio/01-original.wav").content == b"RIFF"
+    assert c.get(f"/api/trials/{job['id']}/audio/steps.json").status_code == 404
     assert c.delete(f"/api/trials/{job['id']}", headers=H).status_code == 200
     assert not trial_file(paths, job["id"]).exists() and not (paths.cache / sha[:16]).exists()
+    assert not steps.exists()
     assert c.get("/api/trials").json() == []
 
 

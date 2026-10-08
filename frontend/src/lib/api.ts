@@ -47,6 +47,8 @@ export interface TranscriptionSettings {
   speakers: number;
   /** seconds; null: the model's setting */
   min_duration_off: number | null;
+  /** one speaker per sentence */
+  sentence_level: boolean;
   /** reduce reverberation (WPE) */
   dereverb: boolean;
   wpe_taps: number;
@@ -85,6 +87,19 @@ export interface TrialResult {
   duration_s: number;
   speakers: { label: string; role: string }[];
   turns: { speaker: string | null; start: number; end: number; words: { text: string; start: number; prob: number }[] }[];
+  /** what every processing step did (null for trials from before this existed) */
+  steps: TrialSteps | null;
+}
+
+export interface TrialSteps {
+  audio: { file: string; label: string }[];
+  /** the stage recognition and diarization got */
+  heard_by_models: string;
+  /** seconds per step; a step taken from the cache is missing */
+  seconds: Partial<Record<"dereverb" | "transcribe" | "align" | "diarize" | "analyze", number>>;
+  recognised: { start: number; end: number; text: string; avg_logprob: number; no_speech_prob: number }[];
+  aligned: { words: number; aligned: number; mean_shift_ms: number | null };
+  diarization: { start: number; end: number; speaker: string }[];
 }
 
 export interface Part {

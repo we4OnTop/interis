@@ -111,8 +111,11 @@ Hall und Abstand kosten mehr Genauigkeit als jede Einstellung. In dieser Reihenf
 3. **„Ein Mikrofon im Raum“** im Reiter „Transkription“ (CLI: `--room-mic`).
 4. **Probelauf:** Im Reiter „Transkription“ einen Ausschnitt (1–10 min) mit verschiedenen
    Einstellungen transkribieren und zwei Ergebnisse nebeneinander vergleichen (Text,
-   Sprecher, unsichere Wörter, Rechenzeit). Gute Einstellungen speichern und mit ★ für alle
-   neuen Transkriptionen festlegen. Das Gespräch selbst bleibt dabei unverändert.
+   Sprecher, unsichere Wörter, Rechenzeit). Unter „Schritte“ jede Verarbeitungsstufe anhören
+   (Original, nach „Hall reduzieren“, angeglichen) und sehen, was jeder Schritt geliefert hat
+   und wie lange er gedauert hat: Rohtext der Spracherkennung, wer wann spricht, Ausrichtung.
+   Gute Einstellungen speichern und mit ★ für alle neuen Transkriptionen festlegen. Das
+   Gespräch selbst bleibt dabei unverändert.
 5. **Messen statt raten:** 3–5 Minuten selbst abtippen und die Varianten vergleichen, siehe
    `bench/wer.py`. „fehlend“ hoch = leise Sprache verloren, „falsch“ hoch = undeutlich oder
    unbekannte Begriffe.

@@ -346,6 +346,8 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
         min_duration_off=args.min_duration_off,
         dereverb=(args.wpe_taps, args.wpe_delay, args.wpe_iterations) if args.dereverb else None,
         clip=(args.start, args.duration) if args.duration else None,
+        sentence_level=args.speaker_per_sentence,
+        steps_dir=Path(args.steps_dir) if args.steps_dir else None,
         interview_id=args.id,
         analysis=_analysis_options(args, paths, redo_roles=True),
     )
@@ -429,6 +431,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wpe-delay", type=int, default=3,
                    help="WPE: frames kept as direct sound before the prediction starts")
     p.add_argument("--wpe-iterations", type=int, default=3, help="WPE: estimation rounds")
+    p.add_argument("--speaker-per-sentence", action="store_true",
+                   help="one speaker per sentence (no switch inside a sentence)")
+    p.add_argument("--steps-dir", help="trial run: write every processing stage's audio and "
+                                       "every step's result into this folder")
     p.add_argument("--start", type=float, default=0.0, help="excerpt: start in seconds")
     p.add_argument("--duration", type=float, help="excerpt: length in seconds (default: all)")
     p.add_argument("--out", help="trial run: write only this JSON file; the interview, its "

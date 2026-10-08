@@ -42,6 +42,8 @@ def settings_args(options: dict) -> list[str]:
             args += [flag, str(options[key])]
     if options.get("room_mic") is True:
         args.append("--room-mic")
+    if options.get("sentence_level") is True:
+        args.append("--speaker-per-sentence")
     if options.get("dereverb") is True:
         args += ["--dereverb", "--wpe-taps", str(int(options.get("wpe_taps", 10))),
                  "--wpe-delay", str(int(options.get("wpe_delay", 3))),
@@ -51,6 +53,11 @@ def settings_args(options: dict) -> list[str]:
 
 def trial_file(paths: Paths, job_id: int) -> Path:
     return paths.root / "trials" / f"{int(job_id)}.json"
+
+
+def trial_steps(paths: Paths, job_id: int) -> Path:
+    """Folder with a trial's stage audio and step results (see run.write_steps)."""
+    return paths.root / "trials" / str(int(job_id))
 
 
 def job_message(text: str) -> str:
@@ -161,7 +168,8 @@ class JobRunner:
                 out = trial_file(self.paths, job["id"])
                 out.parent.mkdir(parents=True, exist_ok=True)
                 return [*cmd, "--id", "PROBE", "--start", str(float(options["start"])),
-                        "--duration", str(float(options["duration"])), "--out", str(out)]
+                        "--duration", str(float(options["duration"])), "--out", str(out),
+                        "--steps-dir", str(trial_steps(self.paths, job["id"]))]
             return [*cmd, "--id", iid, *guide_args]
         transcript = self.paths.exports / iid / f"{iid}.json"
         if not transcript.is_file():

@@ -8,7 +8,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { api, type SettingsInfo, type TranscriptionSettings, type Trial, type TrialResult } from "@/lib/api";
+import { api, type SettingsInfo, type TranscriptionSettings, type Trial, type TrialResult, type TrialSteps } from "@/lib/api";
 import { useFeedback } from "@/lib/feedback";
 import { clock, MODEL_LABEL, STAGE_LABEL } from "@/lib/format";
 import { usePlayer } from "@/lib/player";
@@ -28,6 +28,7 @@ export function settingsSummary(s: Partial<TranscriptionSettings>): string {
     s.vad_threshold != null ? `VAD ${s.vad_threshold}` : null,
     s.speakers === 0 ? "Sprecher auto" : s.speakers && s.speakers !== 2 ? `${s.speakers} Sprecher` : null,
     s.min_duration_off != null ? `Pausen ${s.min_duration_off} s` : null,
+    s.sentence_level ? "Sprecher pro Satz" : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -368,6 +369,16 @@ export function TranscriptionTab() {
               step={1}
               help="Die bekannte Zahl vorzugeben verringert Verwechslungen. 0 = automatisch erkennen."
             />
+            <label className="flex items-start gap-2 text-sm">
+              <Checkbox className="mt-0.5" checked={form.sentence_level} onCheckedChange={(c) => set("sentence_level", c === true)} />
+              <span>
+                Sprecher pro Satz
+                <span className="text-muted-foreground block text-xs">
+                  Ein Satz bekommt nur einen Sprecher (wer am längsten darin spricht). Verhindert Wechsel mitten im Satz, wo die
+                  Sprechertrennung ihre Grenze leicht falsch setzt. Kurze Einwürfe („Ja.“) bleiben eigene Sätze.
+                </span>
+              </span>
+            </label>
             <NumberField
               id="mdo"
               label="Sprecherpausen überbrücken (s)"
@@ -575,6 +586,7 @@ function TrialView({ t }: { t: Trial }) {
       <p className="text-muted-foreground text-xs">
         {words} Wörter, davon {unsure} unsicher · {r.speakers.length} Sprecher erkannt · {r.turns.length} Abschnitte
       </p>
+      {r.steps && <StepsView id={t.id} steps={r.steps} length={r.duration_s} offset={offset} labels={r.speakers.map((s) => s.label)} />}
       <div className="max-h-[32rem] space-y-2 overflow-auto pr-1">
         {r.turns.map((turn, k) => {
           const who = turn.speaker ? roles.get(turn.speaker) : undefined;
@@ -606,5 +618,116 @@ function TrialView({ t }: { t: Trial }) {
         })}
       </div>
     </div>
+  );
+}
+
+const STEP_NAME: [keyof TrialSteps["seconds"], string][] = [
+  ["dereverb", "Hall reduzieren"],
+  ["transcribe", "Spracherkennung"],
+  ["align", "Wörter ausrichten"],
+  ["diarize", "Sprechertrennung"],
+  ["analyze", "Fragen erkennen"],
+];
+const SPEAKER_COLOR = ["bg-question", "bg-linked", "bg-suggest", "bg-muted-foreground"];
+
+/** What each processing step of a trial did: the audio of every stage, run times, the raw recognition and who
+ * speaks when, so the effect (and the cost) of a setting is visible. */
+function StepsView({ id, steps, length, offset, labels }: { id: number; steps: TrialSteps; length: number; offset: number; labels: string[] }) {
+  const total = Object.values(steps.seconds).reduce((a, b) => a + (b ?? 0), 0);
+  const color = (spk: string) => SPEAKER_COLOR[Math.max(0, labels.indexOf(spk)) % SPEAKER_COLOR.length];
+  const switches = steps.diarization.filter((s, i, all) => i > 0 && all[i - 1].speaker !== s.speaker).length;
+  const share = labels.map((l) => [l, steps.diarization.filter((s) => s.speaker === l).reduce((a, s) => a + s.end - s.start, 0)] as const);
+  return (
+    <details className="rounded-md border px-3 py-2 text-sm">
+      <summary className="cursor-pointer font-medium">Schritte: anhören, Rechenzeit, Zwischenergebnisse</summary>
+      <div className="mt-3 space-y-4">
+        <section className="space-y-1.5">
+          <h4 className="text-xs font-semibold tracking-wide uppercase">Audio je Schritt</h4>
+          {steps.audio.map((a) => (
+            <div key={a.file} className="flex flex-wrap items-center gap-2">
+              <span className="w-48 text-xs">
+                {a.label}
+                {a.file === steps.heard_by_models && <span className="text-muted-foreground block">← das hören die Modelle</span>}
+              </span>
+              <audio controls preload="none" className="h-8 max-w-full" src={`/api/trials/${id}/audio/${a.file}`} />
+            </div>
+          ))}
+        </section>
+
+        <section className="space-y-1">
+          <h4 className="text-xs font-semibold tracking-wide uppercase">Rechenzeit</h4>
+          <table className="text-xs">
+            <tbody>
+              {STEP_NAME.map(([key, name]) => (
+                <tr key={key}>
+                  <td className="pr-4">{name}</td>
+                  <td className="text-right tabular-nums">
+                    {steps.seconds[key] != null ? `${steps.seconds[key]} s` : <span className="text-muted-foreground">aus Zwischenspeicher / aus</span>}
+                  </td>
+                </tr>
+              ))}
+              <tr className="border-t font-medium">
+                <td className="pr-4">gesamt</td>
+                <td className="text-right tabular-nums">
+                  {Math.round(total)} s · Faktor {(total / Math.max(length, 1)).toFixed(2)}×
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p className="text-muted-foreground text-xs">
+            Faktor = Rechenzeit / Audiolänge. Schritte, deren Eingaben sich nicht geändert haben, kommen aus dem Zwischenspeicher und
+            kosten nichts.
+          </p>
+        </section>
+
+        <section className="space-y-1.5">
+          <h4 className="text-xs font-semibold tracking-wide uppercase">Sprechertrennung: wer spricht wann</h4>
+          <div className="bg-muted relative h-6 w-full overflow-hidden rounded">
+            {steps.diarization.map((s, i) => (
+              <div
+                key={i}
+                className={cn("absolute top-0 h-full opacity-80", color(s.speaker))}
+                style={{ left: `${(s.start / length) * 100}%`, width: `${Math.max(((s.end - s.start) / length) * 100, 0.2)}%` }}
+                title={`${s.speaker} ${clock(offset + s.start)}–${clock(offset + s.end)}`}
+              />
+            ))}
+          </div>
+          <p className="text-muted-foreground flex flex-wrap gap-3 text-xs">
+            {share.map(([l, sec]) => (
+              <span key={l} className="flex items-center gap-1">
+                <span className={cn("inline-block size-2.5 rounded-sm", color(l))} />
+                {l}: {Math.round(sec)} s
+              </span>
+            ))}
+            <span>{switches} Wechsel</span>
+            <span>{steps.diarization.filter((s) => s.end - s.start < 1).length} Abschnitte unter 1 s</span>
+          </p>
+        </section>
+
+        <section className="space-y-1">
+          <h4 className="text-xs font-semibold tracking-wide uppercase">Wörter ausrichten</h4>
+          <p className="text-xs">
+            {steps.aligned.aligned} von {steps.aligned.words} Wörtern zeitlich nachjustiert
+            {steps.aligned.mean_shift_ms != null && `, im Mittel um ${steps.aligned.mean_shift_ms} ms verschoben`}.
+          </p>
+        </section>
+
+        <section className="space-y-1">
+          <h4 className="text-xs font-semibold tracking-wide uppercase">Spracherkennung roh (vor Sprechern)</h4>
+          <div className="max-h-64 space-y-0.5 overflow-auto text-xs">
+            {steps.recognised.map((s, i) => {
+              const doubtful = s.avg_logprob < -0.8 || s.no_speech_prob > 0.5;
+              return (
+                <p key={i} className={cn(doubtful && "bg-yellow-200/60 dark:bg-yellow-500/25")} title={`Sicherheit (avg_logprob) ${s.avg_logprob} · keine Sprache ${s.no_speech_prob}`}>
+                  <span className="text-muted-foreground mr-1.5 font-mono">{clock(offset + s.start)}</span>
+                  {s.text}
+                </p>
+              );
+            })}
+          </div>
+          <p className="text-muted-foreground text-xs">Gelb: unsicher erkannt oder vermutlich gar keine Sprache (mögliche Halluzination).</p>
+        </section>
+      </div>
+    </details>
   );
 }

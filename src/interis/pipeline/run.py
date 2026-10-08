@@ -8,7 +8,10 @@ result is reproducible and can be documented in the thesis methods section.
 from __future__ import annotations
 
 import hashlib
+import json
 import platform
+import time
+import wave
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -54,6 +57,10 @@ class PipelineOptions:
     clip: tuple[float, float] | None = None
     # (taps, delay, iterations): reduce reverberation with WPE before all models
     dereverb: tuple[int, int, int] | None = None
+    sentence_level: bool = False  # one speaker per sentence, see merge.by_sentence
+    # trial runs: the audio of every processing stage and every step's result, to listen
+    # to and compare (see write_steps)
+    steps_dir: Path | None = None
     interview_id: str | None = None
     analysis: AnalysisOptions = field(default_factory=AnalysisOptions)
 
@@ -63,6 +70,14 @@ def decode(path: Path) -> np.ndarray:
     from faster_whisper.audio import decode_audio
 
     return decode_audio(str(path), sampling_rate=SAMPLE_RATE)
+
+
+def write_wav(path: Path, audio: np.ndarray) -> None:
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SAMPLE_RATE)
+        w.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
 
 
 def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOptions,
@@ -110,6 +125,7 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
     duration = len(audio) / SAMPLE_RATE
 
     memo: dict[str, np.ndarray] = {}
+    took: dict[str, float] = {}  # seconds per step; a step taken from the cache is missing
 
     def heard() -> np.ndarray:
         """The audio the models get: reverberation reduced if asked, computed only when a
@@ -119,7 +135,9 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
         if "x" not in memo:
             from interis.pipeline.dereverb import dereverb
 
+            t0 = time.monotonic()
             memo["x"] = dereverb(audio, *opts.dereverb, progress=say)
+            took["dereverb"] = time.monotonic() - t0
         return memo["x"]
 
     # options left at their default are not part of the keys: earlier caches stay valid
@@ -134,11 +152,17 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
     if cached is None:
         from interis.pipeline.asr import transcribe
 
-        segments = transcribe(heard(), asr_dir, opts.asr, say)
+        x = heard()
+        t0 = time.monotonic()
+        segments = transcribe(x, asr_dir, opts.asr, say)
+        took["transcribe"] = time.monotonic() - t0
         cache.save("asr", asr_key, [to_dict(s) for s in segments])
     else:
         segments = [Segment.from_dict(s) for s in cached]
     say("transcribe", 1.0)
+    recognised = [{"start": s.start, "end": s.end, "text": s.text.strip(),
+                   "avg_logprob": round(s.avg_logprob, 3),
+                   "no_speech_prob": round(s.no_speech_prob, 3)} for s in segments]
 
     # --- align
     if opts.align:
@@ -149,7 +173,10 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
             from interis.pipeline.align import align
 
             model_dir = verify_ready(paths, ALIGN_MODEL)
-            segments = align(heard(), segments, model_dir, opts.asr.threads, say)
+            x = heard()
+            t0 = time.monotonic()
+            segments = align(x, segments, model_dir, opts.asr.threads, say)
+            took["align"] = time.monotonic() - t0
             cache.save("align", align_key, [to_dict(s) for s in segments])
         else:
             segments = [Segment.from_dict(s) for s in cached]
@@ -172,14 +199,16 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
             from interis.pipeline.diarize import diarize
 
             model_dir = verify_ready(paths, DIARIZATION_MODEL)
-            diarization = diarize(level(heard()) if opts.asr.room_mic else heard(), model_dir,
-                                  opts.num_speakers, say, opts.min_duration_off)
+            x = level(heard()) if opts.asr.room_mic else heard()
+            t0 = time.monotonic()
+            diarization = diarize(x, model_dir, opts.num_speakers, say, opts.min_duration_off)
+            took["diarize"] = time.monotonic() - t0
             cache.save("diarize", diar_key, to_dict(diarization))
         else:
             diarization = Diarization.from_dict(cached)
             say("diarize", 1.0)
 
-    turns = build_turns(segments, diarization, boundaries)
+    turns = build_turns(segments, diarization, boundaries, opts.sentence_level)
     labels = sorted({t.speaker for t in turns if t.speaker is not None})
     speakers = [
         {"label": label, "role": "unknown", "display_name": label,
@@ -205,6 +234,7 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
             "align": opts.align, "diarize": opts.diarize, "num_speakers": opts.num_speakers,
             "min_duration_off": opts.min_duration_off, "vad_threshold": opts.asr.vad,
             "dereverb": list(opts.dereverb) if opts.dereverb else None,
+            "speaker_per_sentence": opts.sentence_level,
             "condition_on_previous_text": False, "vad_filter": True, "language": "de",
         },
         "packages": {p: version(p) for p in _PACKAGES},
@@ -213,10 +243,45 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
     }
     transcript = Transcript(meta=meta, speakers=speakers, turns=turns)
     say("analyze", 0.0)
+    t0 = time.monotonic()
     run_analysis(transcript, paths, opts.analysis,
                  diarization.embeddings if diarization else None, opts.asr.threads)
+    took["analyze"] = time.monotonic() - t0
     say("analyze", 1.0)
+    if opts.steps_dir is not None:
+        write_steps(opts.steps_dir, opts, audio, heard, took, recognised, segments,
+                    diarization)
     return transcript
+
+
+def write_steps(out: Path, opts: PipelineOptions, audio: np.ndarray, heard, took: dict,
+                recognised: list[dict], segments: list[Segment],
+                diarization: Diarization | None) -> None:
+    """Every processing stage as a WAV file and every step's result, so a trial run shows
+    what each setting does: ``steps.json`` plus ``01-original.wav`` … in ``out``."""
+    from interis.pipeline.asr import level
+
+    out.mkdir(parents=True, exist_ok=True)
+    stages = [("01-original.wav", "Original (Ausschnitt)", audio)]
+    if opts.dereverb:
+        stages.append(("02-hall-reduziert.wav", "Nach „Hall reduzieren“", heard()))
+    if opts.asr.room_mic:
+        stages.append(("03-angeglichen.wav", "Lautstärke angeglichen", level(heard())))
+    for name, _label, x in stages:
+        write_wav(out / name, x)
+    words = [w for s in segments for w in s.words]
+    shifts = [abs(w.start - w.asr_start) for w in words if w.aligned and w.asr_start is not None]
+    steps = {
+        "audio": [{"file": name, "label": label} for name, label, _x in stages],
+        "heard_by_models": stages[-1][0],  # what recognition and diarization got
+        "seconds": {k: round(v, 1) for k, v in took.items()},
+        "recognised": recognised,
+        "aligned": {"words": len(words), "aligned": sum(w.aligned for w in words),
+                    "mean_shift_ms": round(1000 * float(np.mean(shifts)), 1) if shifts else None},
+        "diarization": [{"start": s.start, "end": s.end, "speaker": s.speaker}
+                        for s in diarization.exclusive] if diarization else [],
+    }
+    (out / "steps.json").write_text(json.dumps(steps, ensure_ascii=False), encoding="utf-8")
 
 
 def run_analysis(transcript: Transcript, paths: Paths, aopts: AnalysisOptions,
