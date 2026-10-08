@@ -401,7 +401,7 @@ def test_analysis_job_passes_edits_file_and_removes_it(data_dir):
     store.set_word_edits("T1", [{"turn": 1, "word": 1, "action": "replace",
                                  "kind": "correction", "text": "war", "tag": ""}])
     script = ("import json,sys; p=sys.argv[sys.argv.index('--edits')+1];"
-              "print(len(json.load(open(p, encoding='utf-8'))), flush=True)")
+              "print(len(json.load(open(p, encoding='utf-8'))['words']), flush=True)")
 
     class Fake(JobRunner):
         def command(self, job):
@@ -677,3 +677,26 @@ def test_job_messages_show_no_folders():
     assert job_message(text) == "[Errno 13] Permission denied: 'edits-7.json'"
     assert job_message("ERROR: file not found: C:\\Daten\\x.wav") == \
         "ERROR: file not found: x.wav"
+
+
+def test_speaker_correction_api(client, data_dir):
+    def move(**body):
+        return client.post("/api/interviews/T1/speakers", headers=H, json=body)
+
+    assert move(turn=2, first=0, last=0, speaker="S1").status_code == 200  # "Mhm." was S1
+    d = _interview_json(client)
+    assert d["turns"][2]["speaker"] == "S0"
+    assert d["turns"][2]["words"][0]["sp"] == "S1" and d["turns"][2]["words"][0]["so"] == 1
+    assert "sp" not in d["turns"][2]["words"][1] and d["edits_stale"]
+
+    n = len(d["turns"][1]["words"])
+    assert move(turn=1, first=0, last=n - 1, speaker="S0").status_code == 200
+    assert _interview_json(client)["turns"][1]["speaker"] == "S0"  # whole turn moved
+    assert move(turn=1, first=0, last=0, speaker="NOPE").status_code == 422
+    assert move(turn=1, first=0, last=n, speaker="S0").status_code == 422
+
+    move(turn=1, first=0, last=n - 1, speaker=None)
+    move(turn=2, first=0, last=0, speaker=None)
+    d = _interview_json(client)
+    assert d["turns"][1]["speaker"] == "S1" and not d["edits_stale"]
+    assert _store(data_dir).speaker_edits("T1") == []

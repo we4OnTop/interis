@@ -235,6 +235,10 @@ export interface Word {
   k?: EditKind;
   /** smoothing tag, only for smoothing edits */
   g?: string;
+  /** speaker, only when another speaker than the turn's says this word */
+  sp?: string;
+  /** 1 when the speaker was corrected by hand */
+  so?: 1;
 }
 
 export interface Edit {

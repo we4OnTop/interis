@@ -1,4 +1,5 @@
-"""Word-level edits of a transcript: corrections and smoothing (Glättung).
+"""Word-level edits of a transcript: corrections, smoothing (Glättung) and speaker
+corrections.
 
 The machine transcript is never changed. Each edit refers to one word by its position
 (turn, word index). Word indices never move, so every stored position (question marks,
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from dataclasses import replace
 from typing import Any
 
@@ -60,42 +62,55 @@ def _new_text(original: str, new: str) -> str:
     return (" " if original[:1].isspace() else "") + core
 
 
-def apply_edits(t: Transcript, edits: list[dict[str, Any]]) -> Transcript:
-    """A copy of ``t`` in which every edited word carries its effective text.
+def apply_edits(t: Transcript, edits: list[dict[str, Any]],
+                speakers: list[dict[str, Any]] = ()) -> Transcript:
+    """A copy of ``t`` in which every edited word carries its effective text and speaker.
 
     ``edits``: dicts with ``turn``, ``word``, ``action`` (replace|delete) and ``text``.
+    ``speakers``: dicts with ``turn``, ``word`` and ``speaker``. A turn whose words were
+    given to another speaker keeps its place (so every stored position stays valid); its
+    own speaker is then the one who says most of its words.
     Words outside the transcript are ignored. ``t`` itself is not modified.
     """
     by_turn: dict[int, dict[int, dict[str, Any]]] = {}
     for e in edits:
         by_turn.setdefault(e["turn"], {})[e["word"]] = e
+    who: dict[int, dict[int, str]] = {}
+    for s in speakers:
+        who.setdefault(s["turn"], {})[s["word"]] = s["speaker"]
 
     turns = []
     for ti, turn in enumerate(t.turns):
-        changes = by_turn.get(ti)
-        if not changes:
+        changes, moved = by_turn.get(ti, {}), who.get(ti, {})
+        if not changes and not moved:
             turns.append(turn)
             continue
         words = []
         for wi, w in enumerate(turn.words):
             e = changes.get(wi)
-            if e is None:
-                words.append(w)
-            elif e["action"] == "delete":
-                words.append(replace(w, text=""))
-            else:
-                words.append(replace(w, text=_new_text(w.text, e["text"])))
-        turns.append(Turn(turn.speaker, turn.start, turn.end, words))
+            if e is not None:
+                w = replace(w, text="" if e["action"] == "delete"
+                            else _new_text(w.text, e["text"]))
+            if wi in moved:
+                w = replace(w, speaker=moved[wi])
+            words.append(w)
+        speaker = turn.speaker
+        if moved:
+            said = Counter(w.speaker or turn.speaker for w in words if w.text.strip())
+            speaker = said.most_common(1)[0][0] if said else speaker
+        turns.append(Turn(speaker, turn.start, turn.end, words))
     return Transcript(meta=t.meta, speakers=t.speakers, turns=turns, analysis=t.analysis)
 
 
-def edits_digest(edits: list[dict[str, Any]]) -> str:
+def edits_digest(edits: list[dict[str, Any]], speakers: list[dict[str, Any]] = ()) -> str:
     """Fingerprint of the edits. The analysis stores the digest of the edits it was run
     with, so a later edit shows up as "analysis outdated"."""
-    if not edits:
+    if not edits and not speakers:
         return EMPTY_DIGEST
     rows = sorted((e["turn"], e["word"], e["action"], e.get("text", ""), e.get("kind", ""),
                    e.get("tag", "")) for e in edits)
+    # speaker corrections only enter when there are some: earlier digests stay the same
+    rows += sorted((s["turn"], s["word"], "speaker", s["speaker"], "", "") for s in speakers)
     return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 

@@ -100,3 +100,20 @@ def test_old_database_is_upgraded_in_place(tmp_path):
     assert store.project(1)["smoothing_tags"] == ""
     store.update_project(1, None, None, smoothing_tags="A\nB")
     assert store.project(1)["smoothing_tags"] == "A\nB"
+
+
+def test_speaker_corrections_move_words_and_the_turn_follows_the_majority():
+    from interis.analysis.sentences import split_sentences
+
+    t = _transcript()
+    for w in t.turns[0].words:
+        w.speaker = "SPEAKER_00"
+    one = apply_edits(t, [], [{"turn": 0, "word": 1, "speaker": "SPEAKER_01"}])
+    assert one.turns[0].speaker == "SPEAKER_00" and one.turns[0].words[1].speaker == "SPEAKER_01"
+    most = apply_edits(t, [], [{"turn": 0, "word": w, "speaker": "SPEAKER_01"} for w in (0, 1, 2)])
+    assert most.turns[0].speaker == "SPEAKER_01"
+    assert [s.speaker for s in split_sentences(most.turns)] == ["SPEAKER_01"]
+    assert t.turns[0].words[1].speaker == "SPEAKER_00"  # the input is not modified
+    # only speaker corrections change the digest; none keep it as before
+    assert edits_digest([], []) == EMPTY_DIGEST
+    assert edits_digest([], [{"turn": 0, "word": 1, "speaker": "SPEAKER_01"}]) != EMPTY_DIGEST

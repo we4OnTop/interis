@@ -1,5 +1,15 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CornerUpRightIcon, EraserIcon, LoaderIcon, MessageCircleQuestionIcon, PencilIcon, QuoteIcon, RefreshCwIcon, Undo2Icon } from "lucide-react";
+import {
+  CornerUpRightIcon,
+  EraserIcon,
+  LoaderIcon,
+  MessageCircleQuestionIcon,
+  PencilIcon,
+  QuoteIcon,
+  RefreshCwIcon,
+  Undo2Icon,
+  UserRoundIcon,
+} from "lucide-react";
 
 import { LoadError } from "@/components/LoadError";
 import { StatusDot } from "@/components/review";
@@ -78,7 +88,11 @@ function widenToEditGroups(words: Word[], first: number, last: number): [number,
 type Mode = "read" | "correct" | "smooth";
 const MODES: { id: Mode; label: string; hint: string }[] = [
   { id: "read", label: "Lesen", hint: "Auf ein Wort klicken → ab dort anhören." },
-  { id: "correct", label: "Korrigieren", hint: "Falsch erkannte Wörter anklicken oder markieren und ersetzen." },
+  {
+    id: "correct",
+    label: "Korrigieren",
+    hint: "Falsch erkannte Wörter anklicken oder markieren und ersetzen. Falscher Sprecher: Wörter markieren oder auf den Sprechernamen klicken, dann den richtigen Sprecher wählen.",
+  },
   { id: "smooth", label: "Glätten", hint: "Füllwörter, Wiederholungen und Abbrüche markieren, entfernen oder ersetzen – mit Grund." },
 ];
 
@@ -208,6 +222,28 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
       else player.play(source(d.id), d.turns[ti].words[wi].s + 0.15);
     },
     [mode, d, openEdit, player, source],
+  );
+
+  const setSpeaker = async (span: Span, speaker: string | null) => {
+    try {
+      await api("POST", `/api/interviews/${enc(d.id)}/speakers`, { turn: span.turn, first: span.first, last: span.last, speaker });
+      notify(speaker ? `Sprecher geändert – „Analyse aktualisieren“ übernimmt es in die Fragen-Erkennung` : "Sprecher zurückgesetzt");
+      onChanged();
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  const onSpeakerClick = useCallback(
+    (ti: number, x: number, y: number) => {
+      const words = d.turns[ti].words;
+      const text = words
+        .map((w) => w.t)
+        .join("")
+        .trim();
+      setSel({ span: { turn: ti, first: 0, last: words.length - 1, text }, x, y });
+    },
+    [d],
   );
 
   const saveEdit = async () => {
@@ -366,6 +402,8 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
                   interview={d.id}
                   mode={mode}
                   showEdits={showEdits}
+                  speakers={speakers}
+                  onSpeakerClick={mode === "correct" ? onSpeakerClick : undefined}
                   onWordClick={onWordClick}
                   onDeleteLink={deleteLink}
                 />
@@ -411,8 +449,11 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
           <p>
             <span className="underline decoration-question decoration-2 underline-offset-2">unterstrichen</span> = korrigiert,{" "}
             <span className="underline decoration-dashed decoration-muted-foreground decoration-2 underline-offset-2">gestrichelt unterstrichen</span>{" "}
-            = geglättet ersetzt, <span className="line-through">durchgestrichen</span> = entfernt (Korrektur oder Glättung; bei „Änderungen anzeigen“)
+            = geglättet ersetzt, <span className="line-through">durchgestrichen</span> = entfernt,{" "}
+            <span className="outline-muted-foreground/50 rounded-sm outline-1 outline-dashed">gestrichelt umrandet</span> = Sprecher
+            geändert (bei „Änderungen anzeigen“)
           </p>
+          <p>Falscher Sprecher: im Modus „Korrigieren“ Wörter markieren oder auf den Sprechernamen klicken.</p>
         </div>
       </aside>
 
@@ -456,17 +497,47 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
             Als Extrakt übernehmen …
           </Button>
           {mode === "correct" && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                openEdit(sel.span, "replace", "correction");
-                setSel(null);
-              }}
-            >
-              <PencilIcon />
-              Ersetzen …
-            </Button>
+            <>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  openEdit(sel.span, "replace", "correction");
+                  setSel(null);
+                }}
+              >
+                <PencilIcon />
+                Ersetzen …
+              </Button>
+              {d.speakers.map((s) => (
+                <Button
+                  key={s.label}
+                  size="sm"
+                  variant="ghost"
+                  title="Diese Wörter sagt …"
+                  onClick={() => {
+                    void setSpeaker(sel.span, s.label);
+                    setSel(null);
+                  }}
+                >
+                  <UserRoundIcon />
+                  {s.display_name || s.label}
+                </Button>
+              ))}
+              {d.turns[sel.span.turn].words.slice(sel.span.first, sel.span.last + 1).some((w) => w.so) && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    void setSpeaker(sel.span, null);
+                    setSel(null);
+                  }}
+                >
+                  <Undo2Icon />
+                  Sprecher zurücksetzen
+                </Button>
+              )}
+            </>
           )}
           {mode === "smooth" && (
             <>
@@ -606,6 +677,8 @@ const TurnRow = memo(function TurnRow({
   interview,
   mode,
   showEdits,
+  speakers,
+  onSpeakerClick,
   onWordClick,
   onDeleteLink,
 }: {
@@ -619,6 +692,9 @@ const TurnRow = memo(function TurnRow({
   interview: string;
   mode: Mode;
   showEdits: boolean;
+  speakers: Record<string, Speaker>;
+  /** only while correcting: select the whole turn to give it another speaker */
+  onSpeakerClick?: (ti: number, x: number, y: number) => void;
   onWordClick: (ti: number, wi: number) => void;
   onDeleteLink: (lk: Link) => void;
 }) {
@@ -629,10 +705,31 @@ const TurnRow = memo(function TurnRow({
     <div id={`t-${ti}`} className={cn("flex gap-3 border-b px-4 py-2.5 transition-colors last:border-0", playing && "turn-playing")}>
       <span className="text-muted-foreground w-20 shrink-0 pt-0.5 font-mono text-xs tabular-nums">{time}</span>
       <div className="min-w-0 flex-1 leading-relaxed">
-        <span className={cn("mr-1.5 text-sm font-semibold", isInterviewer ? "text-interviewer" : "text-foreground")}>
-          {speaker?.display_name || turn.speaker || "?"}:
-        </span>
+        {onSpeakerClick ? (
+          <button
+            data-selbar
+            className={cn(
+              "hover:bg-accent mr-1.5 cursor-pointer rounded text-sm font-semibold",
+              isInterviewer ? "text-interviewer" : "text-foreground",
+            )}
+            title="Sprecher dieses ganzen Abschnitts ändern"
+            onClick={(e) => {
+              const r = e.currentTarget.getBoundingClientRect();
+              onSpeakerClick(ti, r.left, r.top);
+            }}
+          >
+            {speaker?.display_name || turn.speaker || "?"}:
+          </button>
+        ) : (
+          <span className={cn("mr-1.5 text-sm font-semibold", isInterviewer ? "text-interviewer" : "text-foreground")}>
+            {speaker?.display_name || turn.speaker || "?"}:
+          </span>
+        )}
         {turn.words.map((w, wi) => {
+          // a word another speaker says (corrected by hand): name the speaker where it changes
+          const who = w.sp ?? turn.speaker;
+          const before = wi === 0 ? turn.speaker : (turn.words[wi - 1].sp ?? turn.speaker);
+          const switched = who !== before && w.t !== "";
           const q = qAt(wi);
           const startQ = questions?.find((x) => x.first === wi);
           const startLinks = links?.filter((l) => l.first === wi) ?? [];
@@ -650,6 +747,16 @@ const TurnRow = memo(function TurnRow({
               : undefined;
           return (
             <span key={wi}>
+              {switched && (
+                <span
+                  className={cn(
+                    "mx-1 rounded px-1 py-px align-baseline text-[11px] font-semibold",
+                    who && speakers[who]?.role === "interviewer" ? "bg-question-soft text-interviewer" : "bg-muted",
+                  )}
+                >
+                  {(who && speakers[who]?.display_name) || who || "?"}:
+                </span>
+              )}
               {startQ && (
                 <button
                   className={cn(
@@ -686,6 +793,7 @@ const TurnRow = memo(function TurnRow({
                   corrected && "decoration-question underline decoration-2 underline-offset-2",
                   smoothed && "underline decoration-dashed decoration-muted-foreground decoration-2 underline-offset-2",
                   struck && "text-muted-foreground",
+                  showEdits && w.so && "outline-muted-foreground/50 outline-1 outline-dashed",
                 )}
               >
                 {struck ? <s>{w.o}</s> : w.t}

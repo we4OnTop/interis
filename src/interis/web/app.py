@@ -166,6 +166,10 @@ class EditCreate(WordRange):
     tag: Plain = Field(default="", max_length=MAX_TAG_LEN)
 
 
+class SpeakerUpdate(WordRange):
+    speaker: str | None = Field(default=None, max_length=60)  # None: diarization's speaker
+
+
 class ReviewedUpdate(BaseModel):
     reviewed: bool
 
@@ -405,7 +409,8 @@ def create_app(paths: Paths, login_token: str, port: int,
     def _has_work(interview: str) -> bool:
         """Anything a person did on this interview that word positions would break."""
         return bool(store.question_marks(interview) or store.links(interview)
-                    or store.word_edits(interview) or store.extracts([interview])
+                    or store.word_edits(interview) or store.speaker_edits(interview)
+                    or store.extracts([interview])
                     or store.decisions(interview) or store.reviewed(interview))
 
     def _not_busy(interview: str) -> None:
@@ -420,7 +425,8 @@ def create_app(paths: Paths, login_token: str, port: int,
     def _state_of(interview: str, t: Transcript, guide: Guide | None) -> dict[str, Any]:
         """Review state on the effective transcript (word edits applied)."""
         return interview_state(t, store.question_marks(interview), store.links(interview),
-                               guide, store.word_edits(interview), store.decisions(interview))
+                               guide, store.word_edits(interview), store.decisions(interview),
+                               store.speaker_edits(interview))
 
     def _with_passage(t: Transcript, lk: dict[str, Any]) -> dict[str, Any]:
         """A link with the passage fields of the effective transcript (none if the link
@@ -461,7 +467,8 @@ def create_app(paths: Paths, login_token: str, port: int,
             if iid not in transcripts:
                 continue
             if iid not in effective:
-                effective[iid] = apply_edits(transcripts[iid], store.word_edits(iid))
+                effective[iid] = apply_edits(transcripts[iid], store.word_edits(iid),
+                                             store.speaker_edits(iid))
             t = effective[iid]
             if e["turn"] >= len(t.turns) or e["last"] >= len(t.turns[e["turn"]].words):
                 continue
@@ -721,7 +728,7 @@ def create_app(paths: Paths, login_token: str, port: int,
             "interviews": list(transcripts),
             "cells": {iid: s["cells"] for iid, s in states.items()},
             "unassigned": {iid: s["unassigned"] for iid, s in states.items()},
-            "stale": {iid: edits_stale(t, store.word_edits(iid))
+            "stale": {iid: edits_stale(t, store.word_edits(iid), store.speaker_edits(iid))
                             for iid, t in transcripts.items()},
         }
 
@@ -730,10 +737,12 @@ def create_app(paths: Paths, login_token: str, port: int,
     def interview(interview: str) -> dict[str, Any]:
         t = _transcript(interview)
         edits = store.word_edits(interview)
+        moved = store.speaker_edits(interview)
         original = edited_words(t, edits)  # {(turn, word): {orig, kind, tag, action}}
         guide = _guide_of(interview)
         state = _state_of(interview, t, guide)
-        effective = apply_edits(t, edits)
+        effective = apply_edits(t, edits, moved)
+        corrected = {(s["turn"], s["word"]) for s in moved}
         codes = {q.code for q in guide.questions} if guide else set()
         turns = []
         for ti, tu in enumerate(effective.turns):
@@ -746,6 +755,10 @@ def create_app(paths: Paths, login_token: str, port: int,
                     item["o"], item["k"] = e["orig"], e["kind"]
                     if e["kind"] == "smoothing":
                         item["g"] = e["tag"]
+                if w.speaker and w.speaker != tu.speaker:  # said by another speaker
+                    item["sp"] = w.speaker
+                if (ti, wi) in corrected:
+                    item["so"] = 1  # speaker corrected by hand
                 words.append(item)
             turns.append({"speaker": tu.speaker, "start": tu.start, "end": tu.end,
                           "words": words})
@@ -757,7 +770,7 @@ def create_app(paths: Paths, login_token: str, port: int,
             "speakers": t.speakers,
             "turns": turns,
             "reviewed": store.reviewed(interview),
-            "edits_stale": edits_stale(t, edits),
+            "edits_stale": edits_stale(t, edits, moved),
             "decisions": [{"guide_code": d["guide_code"], "reason": d["reason"],
                            "note": d["note"], "in_guide": d["guide_code"] in codes}
                           for d in store.decisions(interview)],
@@ -812,7 +825,27 @@ def create_app(paths: Paths, login_token: str, port: int,
     @app.post("/api/interviews/{interview}/edits/revert")
     def revert_edits(interview: str, body: WordRange) -> dict[str, bool]:
         _check_span(_transcript(interview), body, body.last)
-        store.revert_word_edits(interview, body.turn, body.first, body.last)
+        with write_lock:
+            _not_transcribing(interview)
+            store.revert_word_edits(interview, body.turn, body.first, body.last)
+        return {"ok": True}
+
+    @app.post("/api/interviews/{interview}/speakers")
+    def set_speakers(interview: str, body: SpeakerUpdate) -> dict[str, bool]:
+        """Words given to another speaker than diarization found (``speaker`` None: back to
+        diarization's). Does not queue an analysis (the page shows "Analyse veraltet")."""
+        _interview_in_project(interview)
+        t = _transcript(interview)
+        _check_span(t, body, body.last)
+        if body.speaker is not None and body.speaker not in {s["label"] for s in t.speakers}:
+            raise HTTPException(422, "unknown speaker")
+        words = t.turns[body.turn].words
+        # the speaker diarization gave a word needs no correction row
+        change = {w: None if body.speaker in (None, words[w].speaker) else body.speaker
+                  for w in range(body.first, body.last + 1)}
+        with write_lock:
+            _not_transcribing(interview)
+            store.set_speakers(interview, body.turn, change)
         return {"ok": True}
 
     @app.post("/api/interviews/{interview}/analyze")
@@ -844,13 +877,14 @@ def create_app(paths: Paths, login_token: str, port: int,
         for iid in ids:
             t = transcripts.get(iid)
             edits = store.word_edits(iid)
+            moved = store.speaker_edits(iid)
             cells: dict[str, str] = {}
             unassigned, stale = 0, False
             if t is not None:
                 state = _state_of(iid, t, guide)
                 cells = {code: cell["status"] for code, cell in state["cells"].items()}
                 unassigned = len(state["unassigned"])
-                stale = edits_stale(t, edits)
+                stale = edits_stale(t, edits, moved)
             rows.append({"id": iid, "transcribed": t is not None,
                          "reviewed": store.reviewed(iid), "edits": edits,
                          "edits_stale": stale, "cells": cells, "unassigned": unassigned,

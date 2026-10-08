@@ -141,17 +141,27 @@ def cmd_enroll(args: argparse.Namespace, paths: Paths) -> int:
     return 0
 
 
-def _load_edits(path: str) -> list[dict]:
-    """Word edits written by the website (a JSON list of {turn, word, action, text, ...})."""
+def _load_edits(path: str) -> tuple[list[dict], list[dict]]:
+    """Word and speaker edits written by the website: {"words": [{turn, word, action, text,
+    ...}], "speakers": [{turn, word, speaker}]}, or only the list of word edits."""
     from interis.web.edits import ACTIONS
 
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    valid = isinstance(data, list) and all(
-        isinstance(e, dict) and isinstance(e.get("turn"), int) and isinstance(e.get("word"), int)
-        and e.get("action") in ACTIONS and isinstance(e.get("text", ""), str) for e in data)
+    if isinstance(data, list):
+        data = {"words": data, "speakers": []}
+
+    def pos(e: object) -> bool:
+        return isinstance(e, dict) and isinstance(e.get("turn"), int) \
+            and isinstance(e.get("word"), int)
+
+    words, speakers = data.get("words"), data.get("speakers")
+    valid = isinstance(words, list) and isinstance(speakers, list) and all(
+        pos(e) and e.get("action") in ACTIONS and isinstance(e.get("text", ""), str)
+        for e in words) and all(pos(s) and isinstance(s.get("speaker"), str) for s in speakers)
     if not valid:
-        raise ValueError("edits file: expected a list of {turn, word, action, text}")
-    return data
+        raise ValueError("edits file: expected {words: [{turn, word, action, text}], "
+                         "speakers: [{turn, word, speaker}]}")
+    return words, speakers
 
 
 def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
@@ -171,7 +181,7 @@ def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
         print("ERROR: --edits belongs to one transcript", file=sys.stderr)
         return 2
     try:
-        edits = _load_edits(args.edits) if args.edits else []
+        edits, speakers = _load_edits(args.edits) if args.edits else ([], [])
     except (OSError, ValueError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
@@ -179,7 +189,7 @@ def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
         raw = Transcript.from_dict(json.loads(src.read_text(encoding="utf-8")))
         has_roles = any(s.get("role") in ("interviewer", "interviewee")
                         for s in raw.speakers)
-        effective = apply_edits(raw, edits)  # the analysis sees the edited text
+        effective = apply_edits(raw, edits, speakers)  # the analysis sees the edited text
         try:
             run_analysis(effective, paths, _analysis_options(args, paths, not has_roles),
                          threads=args.threads)
@@ -187,7 +197,7 @@ def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
         # Only the analysis goes back into the transcript; its words stay as recorded.
-        raw.analysis = {**effective.analysis, "edits_digest": edits_digest(edits)}
+        raw.analysis = {**effective.analysis, "edits_digest": edits_digest(edits, speakers)}
         try:
             _write_outputs(raw, src.parent, args.formats)
         except ValueError as e:

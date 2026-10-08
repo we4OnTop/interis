@@ -92,6 +92,15 @@ CREATE TABLE IF NOT EXISTS word_edits (
     updated_at   TEXT NOT NULL,
     PRIMARY KEY (interview_id, turn, word)
 );
+-- Speaker corrections: the word belongs to another speaker than diarization said.
+CREATE TABLE IF NOT EXISTS speaker_edits (
+    interview_id TEXT NOT NULL,
+    turn         INTEGER NOT NULL,
+    word         INTEGER NOT NULL,
+    speaker      TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (interview_id, turn, word)
+);
 -- Extraction: a passage of an answer, summarised in your own words for a guide question.
 CREATE TABLE IF NOT EXISTS extracts (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,8 +133,8 @@ CREATE TABLE IF NOT EXISTS asr_presets (
 
 
 # Tables whose rows refer to word positions of one interview.
-DECISION_TABLES = ("question_marks", "answer_links", "word_edits", "extracts",
-                   "question_decisions")
+DECISION_TABLES = ("question_marks", "answer_links", "word_edits", "speaker_edits",
+                   "extracts", "question_decisions")
 
 
 def _now() -> str:
@@ -341,6 +350,27 @@ class Store:
         with self._conn() as c:
             c.execute("DELETE FROM word_edits WHERE interview_id = ? AND turn = ? "
                       "AND word BETWEEN ? AND ?", (interview_id, turn, first, last))
+
+    def speaker_edits(self, interview_id: str) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT turn, word, speaker FROM speaker_edits WHERE interview_id = ? "
+                             "ORDER BY turn, word", (interview_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_speakers(self, interview_id: str, turn: int, words: dict[int, str | None]) -> None:
+        """{word index: speaker}; ``None`` removes the correction (diarization's speaker)."""
+        now = _now()
+        with self._conn() as c:
+            for word, speaker in words.items():
+                if speaker is None:
+                    c.execute("DELETE FROM speaker_edits WHERE interview_id = ? AND turn = ? "
+                              "AND word = ?", (interview_id, turn, word))
+                else:
+                    c.execute("INSERT INTO speaker_edits (interview_id, turn, word, speaker, "
+                              "updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(interview_id, "
+                              "turn, word) DO UPDATE SET speaker = excluded.speaker, "
+                              "updated_at = excluded.updated_at",
+                              (interview_id, turn, word, speaker, now))
 
     def reviewed(self, interview_id: str) -> bool:
         with self._conn() as c:

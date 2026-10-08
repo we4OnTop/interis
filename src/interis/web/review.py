@@ -28,9 +28,10 @@ def passage(t: Transcript, turn: int, first: int, last: int) -> dict[str, Any]:
             "end": words[-1].end, "text": "".join(w.text for w in words).strip()}
 
 
-def edits_stale(t: Transcript, edits: list[dict[str, Any]]) -> bool:
-    """True if the analysis was made before the current word edits."""
-    return edits_digest(edits) != t.analysis.get("edits_digest", EMPTY_DIGEST)
+def edits_stale(t: Transcript, edits: list[dict[str, Any]],
+                speakers: list[dict[str, Any]] = ()) -> bool:
+    """True if the analysis was made before the current word and speaker edits."""
+    return edits_digest(edits, speakers) != t.analysis.get("edits_digest", EMPTY_DIGEST)
 
 
 def span_fits(t: Transcript, turn: int, first: int, last: int) -> bool:
@@ -101,10 +102,11 @@ def _dialogue(t: Transcript, start_turn: int, end_turn: int,
 def interview_state(t: Transcript, marks: list[dict[str, Any]],
                     links: list[dict[str, Any]], guide: Guide | None,
                     edits: list[dict[str, Any]] | None = None,
-                    decisions: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                    decisions: list[dict[str, Any]] | None = None,
+                    speakers: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Everything the comparison view needs for one interview, keyed by guide code.
     Works on the effective transcript: word edits applied first (see ``apply_edits``)."""
-    t = apply_edits(t, edits or [])
+    t = apply_edits(t, edits or [], speakers or [])
     decided = {d["guide_code"]: {"reason": d["reason"], "note": d["note"]}
                for d in decisions or []}
     marks = [m for m in marks if span_fits(t, m["turn"], m["first"], m["last"])]

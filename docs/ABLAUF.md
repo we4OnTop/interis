@@ -65,7 +65,7 @@ weiteren Schritte legen sich als Änderungen darüber.
 **Erledigt:** Das Gespräch ist transkribiert.
 
 **Achtung:** „Neu transkribieren“ löscht alle Markierungen dieses Gesprächs: Fragenzuordnungen,
-Verknüpfungen, Korrekturen, Glättungen, Begründungen, Extrakte und das Häkchen „Korrektur
+Verknüpfungen, Korrekturen, Sprecherkorrekturen, Glättungen, Begründungen, Extrakte und das Häkchen „Korrektur
 abgeschlossen“. Dafür fragt Interis nach, und die Bestätigung nennt genau diese Arten. Gelöscht
 wird erst, wenn die neue Transkription fertig ist. Bricht man den Auftrag ab oder schlägt er
 fehl, bleiben die Markierungen erhalten. Solange eine Transkription wartet oder läuft, lassen
@@ -89,7 +89,14 @@ darf höchstens 200 Zeichen lang sein.
 Ein Wort trägt nur eine Art Änderung. Wer ein korrigiertes Wort glätten will, nimmt zuerst die
 Korrektur zurück; sonst meldet Interis „Diese Stelle hat schon eine andere Änderung“.
 
-Korrekturen machen die Analyse veraltet, wie Glättungen. Danach „Analyse aktualisieren“ wählen,
+**Falscher Sprecher:** Wörter markieren oder auf den Sprechernamen eines Abschnitts klicken
+und den richtigen Sprecher wählen; „Sprecher zurücksetzen“ nimmt das zurück. Der Abschnitt
+bleibt an seiner Stelle (alle Markierungen bleiben gültig); wo innerhalb eines Abschnitts der
+Sprecher wechselt, steht sein Name im Text. Ein Abschnitt zählt für den Sprecher, der die
+meisten seiner Wörter sagt; ein Satz ebenso. Bei „Änderungen anzeigen“ sind geänderte Wörter
+gestrichelt umrandet.
+
+Korrekturen und Sprecherkorrekturen machen die Analyse veraltet, wie Glättungen. Danach „Analyse aktualisieren“ wählen,
 damit die Fragenerkennung den korrigierten Text nutzt.
 
 Wenn alle Fehler korrigiert sind, die Checkbox **„Korrektur abgeschlossen“** ankreuzen.

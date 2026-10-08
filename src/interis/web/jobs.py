@@ -154,14 +154,16 @@ class JobRunner:
         return [*base, "analyze", str(transcript), *guide_args]
 
     def _write_edits(self, job: dict, path: Path) -> bool:
-        """The word edits of an interview as a temporary JSON file (no transcript text is
-        logged). False if there are no edits."""
+        """The word and speaker edits of an interview as a temporary JSON file (no
+        transcript text is logged). False if there are none."""
         rows = [{k: e[k] for k in ("turn", "word", "action", "kind", "text", "tag")}
                 for e in self.store.word_edits(job["interview_id"])]
-        if not rows:
+        speakers = self.store.speaker_edits(job["interview_id"])
+        if not rows and not speakers:
             return False
         self.paths.tmp.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+        path.write_text(json.dumps({"words": rows, "speakers": speakers}, ensure_ascii=False),
+                        encoding="utf-8")
         return True
 
     def _run(self, job: dict) -> None:
