@@ -275,6 +275,8 @@ export interface InterviewDetail {
   cells: Record<string, Cell>;
   reviewed: boolean;
   edits_stale: boolean;
+  /** an interviewer voice profile exists (see "Sprecher nach Stimme") */
+  voice_profile: boolean;
   decisions: { guide_code: string; reason: DecisionReason; note: string }[];
   edits: Edit[];
 }

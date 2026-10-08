@@ -153,3 +153,53 @@ def test_api_job_and_results_layer_under_manual_corrections(tmp_path):
     assert [w.get("sp", turn["speaker"]) for w in words] == ["A", "A", "B", "B"]
     assert c.delete("/api/interviews/T1/speakers/reference", headers=h).status_code == 200
     assert [(s["word"], s["source"]) for s in store.speaker_edits("T1")] == [(0, "manual")]
+
+
+def test_with_the_interviewers_voice_profile_no_reference_is_needed():
+    from interis.analysis.speakers import voice_of
+
+    spec = [("A", "A", 0, "Wie geht es Ihnen heute?")]
+    start = 5
+    for k in range(8):  # the interviewee speaks most; diarization got two of them wrong
+        spec.append(("A" if k in (2, 5) else "B", "B", start, "Das ist eine längere Antwort."))
+        start += 6
+    spec.append(("B", "A", start, "Und was machen Sie beruflich?"))
+    t, truth = _transcript(spec)
+    sentences = split_sentences(t.turns)
+    embed = _embed(truth)
+
+    # learned from a completely corrected interview: here, the A sentences of this one
+    t2, truth2 = _transcript([("A", "A", s, "Eine Frage von mir bitte.") for s in range(0, 60, 6)])
+    profile = voice_of(split_sentences(t2.turns), _embed(truth2), "A")
+    assert float(profile @ (VOICE["A"] / np.linalg.norm(VOICE["A"]))) > 0.95
+
+    changes, stats = reassign(sentences, _words_of(t), embed, until=0, voice=profile,
+                              labels=["A", "B"], interviewer="A")
+    moved = {(c["turn"], c["speaker"]) for c in changes}
+    assert moved == {(3, "B"), (6, "B"), (9, "A")} and stats["reference"] == 0
+    with pytest.raises(ValueError, match="too few sentences"):
+        voice_of(sentences[:2], embed, "A")
+
+
+def test_learning_the_voice_profile_is_a_job_too(tmp_path):
+    from interis.config import Paths
+    from interis.web.jobs import JobRunner
+    from interis.web.store import Store
+
+    paths = Paths(tmp_path)
+    paths.ensure()
+    store = Store(tmp_path / "interis.db")
+    store.add_interview("T1", store.create_project("P"))
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"x")
+    store.add_part("T1", audio)
+    (tmp_path / "exports" / "T1").mkdir(parents=True)
+    (tmp_path / "exports" / "T1" / "T1.json").write_text("{}", encoding="utf-8")
+    runner = JobRunner(paths, store, lambda _i: None, lambda _i: "")
+    learn = runner.command(store.job(store.add_job("speakers", "T1", {"learn": "SPEAKER_01",
+                                                                       "min_seconds": 1.0})))
+    assert learn[learn.index("--save-voice") + 1] == "interviewer" and "--out" not in learn
+    assert learn[learn.index("--speaker") + 1] == "SPEAKER_01"
+    use = runner.command(store.job(store.add_job("speakers", "T1", {
+        "until": 0.0, "margin": 0.1, "min_seconds": 1.0, "use_voice": True})))
+    assert use[use.index("--voice") + 1] == "interviewer" and "--out" in use

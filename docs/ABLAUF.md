@@ -104,6 +104,13 @@ ihren Sprecher. Das Ergebnis erscheint als Sprecherkorrektur (bei „Änderungen
 gepunktet umrandet), deine eigenen Korrekturen bleiben immer vorrangig, und „Zuordnung nach
 Stimme zurücknehmen“ hebt alles davon wieder auf.
 
+Da der Interviewer in allen Gesprächen derselbe ist, reicht ein vollständig korrigiertes
+Gespräch: im selben Dialog „Stimme lernen“ mit dem Interviewer als Sprecher speichert dein
+Stimmprofil. In den anderen Gesprächen dann „Meine Stimme aus dem Stimmprofil“ wählen, ohne
+Referenz: die Stimme der befragten Person lernt Interis aus den Sätzen, die am wenigsten nach
+dir klingen (sie spricht im Interview meist am meisten). Das Profil nutzt auch die
+Interviewer-Erkennung neuer Transkripte. Gilt für Gespräche zu zweit.
+
 Korrekturen und Sprecherkorrekturen machen die Analyse veraltet, wie Glättungen. Danach „Analyse aktualisieren“ wählen,
 damit die Fragenerkennung den korrigierten Text nutzt.
 

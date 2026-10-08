@@ -591,9 +591,11 @@ function SpeakersByVoice({
 }) {
   const { interview } = useProject();
   const { notify, fail, confirm } = useFeedback();
-  const [until, setUntil] = useState("1:00");
+  const [useVoice, setUseVoice] = useState(d.voice_profile);
+  const [until, setUntil] = useState(d.voice_profile ? "0:00" : "1:00");
   const [margin, setMargin] = useState("0.1");
   const [minSeconds, setMinSeconds] = useState("1");
+  const [learnFrom, setLearnFrom] = useState(d.speakers.find((s) => s.role === "interviewer")?.label ?? d.speakers[0]?.label ?? "");
   const job = interview(d.id)?.job;
   const running = job?.kind === "speakers" && (job.status === "queued" || job.status === "running");
   const assigned = d.turns.some((t) => t.words.some((w) => w.so === 2));
@@ -602,14 +604,35 @@ function SpeakersByVoice({
   const start = async () => {
     const [m, s] = until.includes(":") ? until.split(":").map(Number) : [0, Number(until)];
     const seconds = m * 60 + s;
-    if (!Number.isFinite(seconds) || seconds < 10) return fail(new Error("Referenz: mindestens 0:10, z. B. 1:00"));
+    if (!Number.isFinite(seconds) || (!useVoice && seconds < 10))
+      return fail(new Error("Referenz: mindestens 0:10, z. B. 1:00 (oder das Stimmprofil verwenden)"));
     try {
       await api("POST", `/api/interviews/${enc(d.id)}/speakers/reference`, {
         until: seconds,
         margin: Number(margin),
         min_seconds: Number(minSeconds),
+        use_voice: useVoice,
       });
       notify("Läuft im Hintergrund – das Transkript aktualisiert sich danach von selbst");
+      setOpen(false);
+      onChanged();
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  const learn = async () => {
+    const name = d.speakers.find((s) => s.label === learnFrom)?.display_name || learnFrom;
+    const ok = await confirm({
+      title: `Stimmprofil aus „${name}“ in ${d.id} lernen?`,
+      description:
+        "Nur sinnvoll, wenn die Sprecher dieses Gesprächs vollständig korrigiert sind. Ersetzt dein bisheriges Stimmprofil; es wird auch für die Interviewer-Erkennung neuer Transkripte verwendet.",
+      confirm: "Lernen",
+    });
+    if (!ok) return;
+    try {
+      await api("POST", `/api/interviews/${enc(d.id)}/voice-profile`, { speaker: learnFrom });
+      notify("Läuft im Hintergrund – danach steht das Stimmprofil in allen Gesprächen bereit");
       setOpen(false);
       onChanged();
     } catch (e) {
@@ -664,10 +687,21 @@ function SpeakersByVoice({
               Du prüfst den Anfang, das Programm lernt daraus eure Stimmen und ordnet den Rest zu.
             </DialogDescription>
           </DialogHeader>
+          <label className="flex items-start gap-2 text-sm">
+            <Checkbox className="mt-0.5" checked={useVoice} disabled={!d.voice_profile} onCheckedChange={(c) => setUseVoice(c === true)} />
+            <span>
+              Meine Stimme aus dem Stimmprofil (Interviewer)
+              <span className="text-muted-foreground block text-xs">
+                {d.voice_profile
+                  ? "Dann ist keine Referenz nötig (0:00): die Stimme der befragten Person lernt das Programm aus den Sätzen, die am wenigsten nach dir klingen. Eine geprüfte Referenz kann trotzdem helfen."
+                  : "Noch kein Stimmprofil – unten aus einem vollständig korrigierten Gespräch lernen."}
+              </span>
+            </span>
+          </label>
           <ol className="list-decimal space-y-1 pl-5 text-sm">
             <li>
-              Im Modus „Korrigieren“ den Anfang bis zur gewählten Zeit durchgehen und falsche Sprecher richtigstellen (Wörter markieren
-              oder auf den Namen klicken). Jede Person sollte dort einige ganze Sätze sprechen.
+              {useVoice ? "Optional: " : ""}Im Modus „Korrigieren“ den Anfang bis zur gewählten Zeit durchgehen und falsche Sprecher
+              richtigstellen (Wörter markieren oder auf den Namen klicken). Jede Person sollte dort einige ganze Sätze sprechen.
             </li>
             <li>Starten. Jeder spätere Satz geht an die Stimme, der er deutlich ähnlicher klingt.</li>
             <li>
@@ -696,6 +730,29 @@ function SpeakersByVoice({
             Läuft im Hintergrund, grob einige Minuten für ein einstündiges Gespräch. Ein neuer Lauf ersetzt das Ergebnis des vorigen; deine
             eigenen Korrekturen bleiben immer.
           </p>
+          <div className="flex flex-wrap items-end gap-2 border-t pt-3">
+            <div className="grid gap-1.5">
+              <Label>Stimmprofil aus diesem Gespräch lernen</Label>
+              <Select value={learnFrom} onValueChange={setLearnFrom}>
+                <SelectTrigger className="w-48">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {d.speakers.map((s) => (
+                    <SelectItem key={s.label} value={s.label}>
+                      {s.display_name || s.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button variant="outline" onClick={() => void learn()} disabled={!learnFrom}>
+              Stimme lernen
+            </Button>
+            <p className="text-muted-foreground w-full text-xs">
+              Wenn die Sprecher dieses Gesprächs vollständig stimmen: deine Stimme (Interviewer) wählen. Gilt danach für alle Gespräche.
+            </p>
+          </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>
               Abbrechen

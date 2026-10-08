@@ -140,11 +140,14 @@ class JobRunner:
             audio = self.store.part_paths(iid)
             if not audio or not all(p.is_file() for p in audio):
                 raise RuntimeError("Audiodatei nicht gefunden")
-            return [*base, "speakers", str(transcript), "--audio", *map(str, audio),
-                    "--until", str(float(options["until"])),
+            cmd = [*base, "speakers", str(transcript), "--audio", *map(str, audio),
+                   "--min-seconds", str(float(options["min_seconds"])), "--progress-json"]
+            if options.get("learn"):  # learn the interviewer's voice profile
+                return [*cmd, "--save-voice", "interviewer", "--speaker", str(options["learn"])]
+            cmd += ["--until", str(float(options["until"])),
                     "--margin", str(float(options["margin"])),
-                    "--min-seconds", str(float(options["min_seconds"])),
-                    "--out", str(self._speakers_file(job)), "--progress-json"]
+                    "--out", str(self._speakers_file(job))]
+            return [*cmd, "--voice", "interviewer"] if options.get("use_voice") else cmd
         if job["kind"] in ("transcribe", "trial"):
             audio = self.store.part_paths(iid)
             missing = [p.name for p in audio if not p.is_file()]
@@ -246,7 +249,8 @@ class JobRunner:
         elif code == 0:
             if job["kind"] == "transcribe":  # the new transcript replaces the old positions
                 self.store.delete_decisions(job["interview_id"])
-            if job["kind"] == "speakers":  # proposals become corrections you can take back
+            if job["kind"] == "speakers" and not job["options"].get("learn"):
+                # proposals become corrections you can take back
                 result = json.loads(self._speakers_file(job).read_text(encoding="utf-8"))
                 self.store.set_reference_speakers(job["interview_id"], result["changes"])
             self.store.update_job(job_id, status="done", progress=1.0,

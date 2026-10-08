@@ -165,14 +165,21 @@ def _load_edits(path: str) -> tuple[list[dict], list[dict]]:
 
 
 def cmd_speakers(args: argparse.Namespace, paths: Paths) -> int:
-    """Speakers by reference (see interis.analysis.speakers): writes the proposed speaker
-    corrections to --out; the transcript itself is not changed."""
+    """Speakers by voice (see interis.analysis.speakers): writes the proposed speaker
+    corrections to --out, or with --save-voice a voice profile; the transcript itself is
+    not changed."""
     import numpy as np
 
-    from interis.analysis.roles import voice_embedder
+    from interis.analysis.roles import load_voice, save_voice, voice_embedder
     from interis.analysis.sentences import split_sentences
-    from interis.analysis.speakers import reassign
-    from interis.models import DIARIZATION_MODEL, ModelError, sha256_file, verify_ready
+    from interis.analysis.speakers import reassign, voice_of
+    from interis.models import (
+        DIARIZATION_MODEL,
+        MODELS,
+        ModelError,
+        sha256_file,
+        verify_ready,
+    )
     from interis.pipeline.run import SAMPLE_RATE, decode
     from interis.pipeline.types import Transcript
     from interis.web.edits import apply_edits
@@ -187,6 +194,14 @@ def cmd_speakers(args: argparse.Namespace, paths: Paths) -> int:
                              "from")
         words, moved = _load_edits(args.edits) if args.edits else ([], [])
         model_dir = verify_ready(paths, DIARIZATION_MODEL)
+        voice = None
+        if args.voice:
+            profile = load_voice(paths.voices / f"{args.voice}.json")
+            if profile is None:
+                raise ValueError(f"no voice profile '{args.voice}'")
+            voice = np.asarray(profile["embedding"])
+        if not args.save_voice and not args.out:
+            raise ValueError("give --out (assign speakers) or --save-voice (learn a voice)")
     except (OSError, ValueError, ModelError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -206,11 +221,24 @@ def cmd_speakers(args: argparse.Namespace, paths: Paths) -> int:
         turn = effective.turns[s.turn]
         return [(s.turn, i, turn.words[i]) for i in range(s.first, s.last + 1)]
 
+    def crop(a: float, b: float) -> np.ndarray:
+        return embed(audio[int(a * SAMPLE_RATE):int(b * SAMPLE_RATE)])
+
     try:
+        if args.save_voice:
+            vec = voice_of(sentences, crop, args.speaker, args.min_seconds,
+                           lambda x: progress("speakers", x))
+            save_voice(paths.voices / f"{args.save_voice}.json", args.save_voice, vec,
+                       MODELS[DIARIZATION_MODEL].revision)
+            print(f"\nStimmprofil „{args.save_voice}“ aus {raw.meta.get('interview_id')} "
+                  "gespeichert")
+            return 0
+        interviewer = next((s["label"] for s in raw.speakers
+                            if s.get("role") == "interviewer"), None)
         changes, stats = reassign(
-            sentences, words_of,
-            lambda a, b: embed(audio[int(a * SAMPLE_RATE):int(b * SAMPLE_RATE)]),
-            args.until, args.margin, args.min_seconds, lambda x: progress("speakers", x))
+            sentences, words_of, crop, args.until, args.margin, args.min_seconds,
+            lambda x: progress("speakers", x), voice=voice,
+            labels=[s["label"] for s in raw.speakers], interviewer=interviewer)
     except ValueError as e:
         print(f"\nERROR: {e}", file=sys.stderr)
         return 1
@@ -434,7 +462,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how clearly a voice must match better than the other (cosine)")
     p.add_argument("--min-seconds", type=float, default=1.0,
                    help="shorter sentences keep their speaker")
-    p.add_argument("--out", required=True, help="JSON file for the proposed changes")
+    p.add_argument("--out", help="JSON file for the proposed changes")
+    p.add_argument("--voice", help="the interviewer's voice profile to use (e.g. interviewer)")
+    p.add_argument("--save-voice", help="instead: learn this voice profile from --speaker's "
+                                        "sentences (a transcript you corrected completely)")
+    p.add_argument("--speaker", help="with --save-voice: the speaker label to learn")
     p.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_speakers)
 

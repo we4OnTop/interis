@@ -85,6 +85,7 @@ MAX_DOCX_BYTES = 20 * 1024**2
 MAX_DOCX_UNPACKED = 50 * 1024**2
 MAX_GUIDE_CHARS = 200_000
 LEGACY_PROJECT = "Bestehende Interviews"
+VOICE = "interviewer"  # the voice profile `interis enroll` and the role detection use
 
 
 class Span(BaseModel):
@@ -171,9 +172,14 @@ class SpeakerUpdate(WordRange):
 
 
 class ReferenceRequest(BaseModel):
-    until: float = Field(ge=10, le=3600)  # the checked reference: start up to this second
+    until: float = Field(ge=0, le=3600)  # the checked reference: start up to this second
     margin: float = Field(default=0.1, ge=0.0, le=0.5)
     min_seconds: float = Field(default=1.0, ge=0.3, le=5.0)
+    use_voice: bool = False  # the interviewer's voice profile (then no reference needed)
+
+
+class VoiceLearn(BaseModel):
+    speaker: str = Field(max_length=60)
 
 
 class ReviewedUpdate(BaseModel):
@@ -778,6 +784,7 @@ def create_app(paths: Paths, login_token: str, port: int,
             "turns": turns,
             "reviewed": store.reviewed(interview),
             "edits_stale": edits_stale(t, edits, moved),
+            "voice_profile": (paths.voices / f"{VOICE}.json").is_file(),
             "decisions": [{"guide_code": d["guide_code"], "reason": d["reason"],
                            "note": d["note"], "in_guide": d["guide_code"] in codes}
                           for d in store.decisions(interview)],
@@ -859,6 +866,21 @@ def create_app(paths: Paths, login_token: str, port: int,
     def speakers_by_reference(interview: str, body: ReferenceRequest) -> dict[str, int]:
         """Assign the speakers after the reference stretch by voice (a background job; see
         interis.analysis.speakers). Its result replaces earlier results of this kind."""
+        if body.use_voice and not (paths.voices / f"{VOICE}.json").is_file():
+            raise HTTPException(422, "Noch kein Stimmprofil")
+        if not body.use_voice and body.until < 10:
+            raise HTTPException(422, "Referenz: mindestens 10 Sekunden")
+        return {"job": _speakers_job(interview, body.model_dump())}
+
+    @app.post("/api/interviews/{interview}/voice-profile")
+    def learn_voice(interview: str, body: VoiceLearn) -> dict[str, int]:
+        """Learn the interviewer's voice profile from this interview's ``speaker`` (all
+        their sentences, speaker corrections applied). Replaces the existing profile."""
+        if body.speaker not in {s["label"] for s in _transcript(interview).speakers}:
+            raise HTTPException(422, "unknown speaker")
+        return {"job": _speakers_job(interview, {"learn": body.speaker, "min_seconds": 1.0})}
+
+    def _speakers_job(interview: str, options: dict[str, Any]) -> int:
         _interview_in_project(interview)
         _transcript(interview)
         parts = store.parts(interview)
@@ -866,9 +888,9 @@ def create_app(paths: Paths, login_token: str, port: int,
             raise HTTPException(422, "Die Aufnahme fehlt im Datenordner")
         with write_lock:
             _not_busy(interview)
-            job_id = store.add_job("speakers", interview, body.model_dump())
+            job_id = store.add_job("speakers", interview, options)
         runner.notify()
-        return {"job": job_id}
+        return job_id
 
     @app.delete("/api/interviews/{interview}/speakers/reference")
     def undo_speakers_by_reference(interview: str) -> dict[str, bool]:
