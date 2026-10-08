@@ -72,45 +72,156 @@ def is_allowed(module: str, attr: str) -> bool:
     return False
 
 
+class UnsafeCheckpointError(Exception):
+    pass
+
+
+_MARK = object()  # sentinel for MARK on the emulated stack
+_CONST = ("NONE", "NEWTRUE", "NEWFALSE", "INT", "BININT", "BININT1", "BININT2", "LONG",
+          "LONG1", "LONG4", "BINFLOAT", "FLOAT", "BINBYTES", "SHORT_BINBYTES", "BINBYTES8",
+          "BYTEARRAY8", "EMPTY_LIST", "EMPTY_DICT", "EMPTY_TUPLE", "EMPTY_SET", "PERSID")
+_STRING_OPS = ("SHORT_BINUNICODE", "BINUNICODE", "BINUNICODE8", "UNICODE", "SHORT_BINSTRING",
+               "BINSTRING", "STRING")
+_TO_MARK = ("LIST", "TUPLE", "DICT", "FROZENSET", "POP_MARK", "APPENDS", "SETITEMS",
+            "ADDITEMS")
+
+
 def iter_pickle_globals(data: bytes) -> Iterator[tuple[str, str]]:
-    """Yield ``(module, name)`` for every GLOBAL / STACK_GLOBAL / INST in a pickle."""
-    strings: list[str] = []
+    """Yield ``(module, name)`` for every global a pickle pushes onto its stack.
+
+    The opcodes are executed on an emulated stack, so a global is found wherever the real
+    unpickler would find it (no guessing from recent strings). Opcodes that are not modelled
+    here, extension opcodes, out-of-band buffers and stack underflows are refused: the
+    checkpoint is treated as unsafe rather than scanned partially.
+    """
+    stack: list[object] = []
     memo: dict[int, object] = {}
-    last: object = None
+
+    def pop() -> object:
+        if not stack:
+            raise UnsafeCheckpointError("pickle stack underflow")
+        return stack.pop()
+
+    def pop_to_mark() -> list[object]:
+        items: list[object] = []
+        while stack and stack[-1] is not _MARK:
+            items.append(stack.pop())
+        if not stack:
+            raise UnsafeCheckpointError("pickle MARK not found")
+        stack.pop()  # the marker itself
+        return items
+
+    def push_global(module: object, name: object) -> tuple[str, str]:
+        if not (isinstance(module, tuple) and module[0] == "str"
+                and isinstance(name, tuple) and name[0] == "str"):
+            raise UnsafeCheckpointError("STACK_GLOBAL without two strings")
+        found = (module[1], name[1])
+        stack.append(("global", found))
+        return found
+
     for opcode, arg, _pos in pickletools.genops(data):
         op = opcode.name
+        if op in ("PROTO", "FRAME"):
+            continue
+        if op == "STOP":
+            return
         if op in ("GLOBAL", "INST"):
             module, attr = str(arg).split(" ", 1)
+            if op == "INST":
+                pop_to_mark()
+            stack.append(("global", (module, attr)))
             yield module, attr
-            last = None
         elif op == "STACK_GLOBAL":
-            if len(strings) >= 2:
-                yield strings[-2], strings[-1]
-            else:
-                yield "<unresolved>", "<STACK_GLOBAL>"
-            last = None
-        elif op in ("SHORT_BINUNICODE", "BINUNICODE", "BINUNICODE8", "UNICODE",
-                    "SHORT_BINSTRING", "BINSTRING", "STRING"):
-            last = str(arg)
-            strings.append(last)
-        elif op == "MEMOIZE":
-            memo[len(memo)] = last
+            name = pop()
+            module = pop()
+            yield push_global(module, name)
+        elif op in _STRING_OPS:
+            stack.append(("str", str(arg)))
+        elif op in _CONST:
+            stack.append(("other", None))
+        elif op == "BINPERSID":
+            pop()
+            stack.append(("other", None))
+        elif op == "MARK":
+            stack.append(_MARK)
+        elif op in _TO_MARK:
+            pop_to_mark()
+            if op != "POP_MARK" and op not in ("APPENDS", "SETITEMS", "ADDITEMS"):
+                stack.append(("other", None))
+        elif op in ("TUPLE1", "TUPLE2", "TUPLE3"):
+            for _ in range({"TUPLE1": 1, "TUPLE2": 2, "TUPLE3": 3}[op]):
+                pop()
+            stack.append(("other", None))
+        elif op == "APPEND":
+            pop()
+        elif op == "SETITEM":
+            pop()
+            pop()
+        elif op == "BUILD":
+            pop()
+        elif op == "REDUCE":
+            pop()
+            pop()
+            stack.append(("other", None))
+        elif op == "NEWOBJ":
+            pop()
+            pop()
+            stack.append(("other", None))
+        elif op == "NEWOBJ_EX":
+            pop()
+            pop()
+            pop()
+            stack.append(("other", None))
+        elif op == "OBJ":
+            pop_to_mark()
+            stack.append(("other", None))
+        elif op == "POP":
+            pop()
+        elif op == "DUP":
+            if not stack:
+                raise UnsafeCheckpointError("pickle stack underflow")
+            stack.append(stack[-1])
+        elif op in ("MEMOIZE",):
+            if not stack:
+                raise UnsafeCheckpointError("pickle stack underflow")
+            memo[len(memo)] = stack[-1]
         elif op in ("PUT", "BINPUT", "LONG_BINPUT"):
-            memo[int(arg)] = last
+            if not stack:
+                raise UnsafeCheckpointError("pickle stack underflow")
+            memo[int(arg)] = stack[-1]
         elif op in ("GET", "BINGET", "LONG_BINGET"):
-            value = memo.get(int(arg))
-            if isinstance(value, str):
-                strings.append(value)
-            last = value
+            if int(arg) not in memo:
+                raise UnsafeCheckpointError("pickle GET of an unset memo entry")
+            value = memo[int(arg)]
+            stack.append(value)
+            if isinstance(value, tuple) and value[0] == "global":
+                yield value[1]
         else:
-            last = None
+            # EXT1/EXT2/EXT4, NEXT_BUFFER, READONLY_BUFFER and anything unknown.
+            raise UnsafeCheckpointError(f"unsupported pickle opcode {op}")
 
 
 def _pickle_blobs(path: Path) -> Iterator[bytes]:
+    """The pickles torch would read from this file, or refusal.
+
+    torch decides the format by the signature at offset 0 alone. A zip with junk in front
+    is therefore read by torch as a legacy pickle that a zip-based scan would never see.
+    """
+    with path.open("rb") as f:
+        if f.read(4) != b"PK\x03\x04":
+            raise UnsafeCheckpointError(
+                f"{path}: not a zip archive at offset 0 (legacy checkpoint format is not accepted)")
     if not zipfile.is_zipfile(path):
-        raise UnsafeCheckpointError(f"{path}: legacy non-zip checkpoint format is not accepted")
+        raise UnsafeCheckpointError(f"{path}: unreadable zip archive")
     with zipfile.ZipFile(path) as zf:
-        for info in zf.infolist():
+        infos = zf.infolist()
+        names = [i.filename for i in infos]
+        if len(set(names)) != len(names):
+            raise UnsafeCheckpointError(f"{path}: duplicate entry names")
+        for info in infos:
+            if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                raise UnsafeCheckpointError(f"{path}: unsupported compression in {info.filename}")
+        for info in infos:
             if info.filename.endswith(".pkl"):
                 yield zf.read(info)
 
@@ -126,18 +237,17 @@ class ScanResult:
         return not self.rejected
 
 
-class UnsafeCheckpointError(Exception):
-    pass
-
-
 def scan_checkpoint(path: Path) -> ScanResult:
     result = ScanResult(path=Path(path))
-    for blob in _pickle_blobs(Path(path)):
-        for module, attr in iter_pickle_globals(blob):
-            name = f"{module}:{attr}"
-            result.globals_found.add(name)
-            if not is_allowed(module, attr):
-                result.rejected.add(name)
+    try:
+        for blob in _pickle_blobs(Path(path)):
+            for module, attr in iter_pickle_globals(blob):
+                name = f"{module}:{attr}"
+                result.globals_found.add(name)
+                if not is_allowed(module, attr):
+                    result.rejected.add(name)
+    except UnsafeCheckpointError as e:
+        result.rejected.add(f"<refused: {e}>")
     return result
 
 
