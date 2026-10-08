@@ -78,3 +78,35 @@ def test_times_are_shown_per_recording_part():
     assert stamp(t, 75.0) == "Teil 2 00:01:03"
     single = Transcript(meta={"audio": {"duration_s": 10.0}}, speakers=[], turns=[])
     assert stamp(single, 75.0) == "00:01:15"
+
+
+def test_sentence_level_gives_a_sentence_one_speaker():
+    # the diarization boundary is a little late: "Gut," would go to A word by word
+    words = [_w(" Wie", 0.0, 0.3), _w(" geht's?", 0.3, 0.8),
+             _w(" Gut,", 0.9, 1.2), _w(" danke", 1.2, 1.6), _w(" sehr.", 1.6, 1.9)]
+    spans = [SpeakerSpan(0.0, 1.1, "A"), SpeakerSpan(1.1, 2.0, "B")]
+    diar = Diarization(regular=spans, exclusive=spans)
+    turns = build_turns([_seg(words)], diar)
+    assert [(t.speaker, t.text) for t in turns] == [("A", "Wie geht's? Gut,"), ("B", "danke sehr.")]
+    turns = build_turns([_seg(words)], diar, sentence_level=True)
+    assert [(t.speaker, t.text) for t in turns] == [("A", "Wie geht's?"), ("B", "Gut, danke sehr.")]
+
+
+def test_channel_diarization_follows_the_louder_microphone():
+    import numpy as np
+    import pytest
+
+    from interis.pipeline.diarize import by_channel
+
+    sr = 16000
+    rng = np.random.default_rng(0)
+    a = rng.standard_normal(2 * sr) * 0.3  # person on the left microphone
+    b = rng.standard_normal(2 * sr) * 0.3
+    quiet = rng.standard_normal(sr) * 0.001
+    left = np.concatenate([a, quiet, b * 0.1]).astype(np.float32)  # crosstalk 20 dB down
+    right = np.concatenate([a * 0.1, quiet, b]).astype(np.float32)
+    d = by_channel(left, right)
+    assert [(s.speaker, round(s.start), round(s.end)) for s in d.exclusive] == [
+        ("KANAL_L", 0, 2), ("KANAL_R", 3, 5)]
+    with pytest.raises(ValueError):
+        by_channel(left, left.copy())  # mono recorded as stereo

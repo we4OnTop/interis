@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections import defaultdict
 
+from interis.analysis.sentences import _ends_sentence
 from interis.pipeline.types import Diarization, Segment, SpeakerSpan, Turn, Word
 
 MAX_GAP_S = 1.0  # a word outside any speech span takes the nearest span within this gap
@@ -60,16 +62,42 @@ def assign_speakers(words: list[Word], diarization: Diarization) -> None:
             words[i].speaker = words[i + 1].speaker
 
 
+def by_sentence(segments: list[Segment]) -> None:
+    """Give every sentence one speaker: the one who has most of its speaking time.
+
+    Word-level assignment flips the speaker inside a sentence wherever a diarization
+    boundary is a little off, mostly at the first or last words of a turn. A sentence ends
+    at sentence punctuation or at the end of a recognised segment (a pause), so short
+    interjections ("Ja.", "Mhm.") stay their own sentence and keep their speaker."""
+    for seg in segments:
+        sentence: list[Word] = []
+        for i, w in enumerate(seg.words):
+            sentence.append(w)
+            if _ends_sentence(w.text) or i == len(seg.words) - 1:
+                time: dict[str | None, float] = defaultdict(float)
+                for x in sentence:
+                    time[x.speaker] += max(x.end - x.start, 1e-3)
+                time.pop(None, None)
+                if time:
+                    speaker = max(time, key=lambda k: time[k])
+                    for x in sentence:
+                        x.speaker = speaker
+                sentence = []
+
+
 def build_turns(segments: list[Segment], diarization: Diarization | None,
-                boundaries: list[float] | tuple[float, ...] = ()) -> list[Turn]:
+                boundaries: list[float] | tuple[float, ...] = (),
+                sentence_level: bool = False) -> list[Turn]:
     """``boundaries``: start times of recording parts 2, 3, … – a turn never spans a
-    break between two recordings."""
+    break between two recordings. ``sentence_level``: see :func:`by_sentence`."""
     if diarization is None:
         # Without diarization each ASR segment becomes one turn with unknown speaker.
         return [Turn(None, s.start, s.end, list(s.words)) for s in segments if s.words]
 
     words = [w for s in segments for w in s.words]
     assign_speakers(words, diarization)
+    if sentence_level:
+        by_sentence(segments)
     turns: list[Turn] = []
     for w in words:
         same_part = bool(turns) and not any(turns[-1].end <= b <= w.start for b in boundaries)

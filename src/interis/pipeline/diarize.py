@@ -74,3 +74,45 @@ def diarize(audio: np.ndarray, model_dir: Path, num_speakers: int | None = 2,
         exclusive=_spans(output.exclusive_speaker_diarization),
         embeddings=embeddings,
     )
+
+
+FRAME_S = 0.05
+
+
+def by_channel(left: np.ndarray, right: np.ndarray, min_gap_s: float = 0.3) -> Diarization:
+    """Who speaks when, for a recording where each person has their own microphone on one
+    stereo channel (lavalier or headset microphones): in every 50 ms the louder channel
+    speaks. Each microphone also picks up the other person, but much more quietly, so the
+    level difference decides. Pauses are where both channels are near their noise floor.
+
+    Raises ValueError for a recording without two different channels (mono, or one
+    microphone recorded in stereo)."""
+    n = int(FRAME_S * SAMPLE_RATE)
+    frames = min(len(left), len(right)) // n
+    if frames < 2:
+        return Diarization(regular=[], exclusive=[], embeddings={})
+    lf = left[:frames * n].reshape(frames, n)
+    rf = right[:frames * n].reshape(frames, n)
+    if np.sqrt(np.mean((lf - rf) ** 2)) < 0.05 * np.sqrt(np.mean((lf + rf) ** 2)) + 1e-9:
+        raise ValueError("the recording has no separate left and right channel")
+    db_l = 10 * np.log10(np.mean(lf ** 2, axis=1) + 1e-10)
+    db_r = 10 * np.log10(np.mean(rf ** 2, axis=1) + 1e-10)
+    loud = np.maximum(db_l, db_r)
+    active = loud > np.percentile(loud, 10) + 12  # 12 dB above the noise floor
+    # median over 250 ms: one loud frame (a cough, a knock) does not change the speaker
+    k = 5
+    diff = np.pad(db_l - db_r, k // 2, mode="edge")
+    diff = np.median(np.lib.stride_tricks.sliding_window_view(diff, k), axis=1)
+    who = np.where(diff >= 0, "KANAL_L", "KANAL_R")
+
+    spans: list[SpeakerSpan] = []
+    for i in np.flatnonzero(active):
+        start, end, speaker = i * FRAME_S, (i + 1) * FRAME_S, str(who[i])
+        last = spans[-1] if spans else None
+        if last and last.speaker == speaker and start - last.end <= min_gap_s:
+            last.end = round(end, 3)
+        else:
+            spans.append(SpeakerSpan(round(start, 3), round(end, 3), speaker))
+    # ponytail: no overlap detection (both talking): the louder one wins. Compare both
+    # channels' levels against their own speech level if overlaps matter.
+    return Diarization(regular=spans, exclusive=list(spans), embeddings={})
