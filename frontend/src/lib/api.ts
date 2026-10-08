@@ -165,6 +165,8 @@ export interface Compare {
   interviews: string[];
   cells: Record<string, Record<string, Cell>>;
   unassigned: Record<string, AskedQuestion[]>;
+  /** per interview: the analysis predates its current edits */
+  stale: Record<string, boolean>;
 }
 
 export interface Word {
@@ -222,6 +224,8 @@ export interface Extract {
   id: number;
   interview: string;
   guide_code: string;
+  /** false when the guide no longer has this question code */
+  in_guide: boolean;
   turn: number;
   first: number;
   last: number;
@@ -253,6 +257,8 @@ export interface WorkflowInterview {
   missing: string[];
   unassigned: number;
   extracts: number;
+  /** server rules for "done" per step; `assign` is informational only (no tick) */
+  done: { transcribe: boolean; correct: boolean; smooth: boolean; assign: boolean; explain: boolean; extract: boolean };
 }
 
 export interface Workflow {
@@ -275,14 +281,32 @@ export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn;
 }
 
-async function detail(res: Response): Promise<string> {
-  const text = await res.text();
+/** Error text from a response body: the backend's `detail` string, or FastAPI's validation list in German. */
+function message(text: string, fallback: string): string {
   try {
     const d = JSON.parse(text).detail;
-    return typeof d === "string" ? d : JSON.stringify(d);
+    if (typeof d === "string") return d;
+    if (Array.isArray(d))
+      return d
+        .map((e: { loc?: unknown[]; type?: string; ctx?: { max_length?: number } }) => {
+          const field = (e.loc ?? []).filter((p) => p !== "body").join(".");
+          const why =
+            e.type === "string_too_long"
+              ? `zu lang (höchstens ${e.ctx?.max_length} Zeichen)`
+              : e.type?.startsWith("missing")
+                ? "fehlt"
+                : "ungültig";
+          return field ? `${field}: ${why}` : why;
+        })
+        .join("\n");
   } catch {
-    return text || res.statusText;
+    /* not JSON: show the text itself */
   }
+  return text || fallback;
+}
+
+async function detail(res: Response): Promise<string> {
+  return message(await res.text(), res.statusText);
 }
 
 export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
@@ -314,13 +338,7 @@ export function uploadFile(
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) return resolve(JSON.parse(xhr.responseText));
-      let msg = xhr.responseText;
-      try {
-        msg = JSON.parse(msg).detail;
-      } catch {
-        /* plain text */
-      }
-      reject(new ApiError(xhr.status, msg));
+      reject(new ApiError(xhr.status, message(xhr.responseText, xhr.statusText)));
     };
     xhr.onerror = () => reject(new ApiError(0, "Verbindung unterbrochen"));
     xhr.send(file);

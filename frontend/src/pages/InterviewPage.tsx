@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CornerUpRightIcon, EraserIcon, LoaderIcon, MessageCircleQuestionIcon, PencilIcon, QuoteIcon, RefreshCwIcon, Undo2Icon } from "lucide-react";
 
+import { LoadError } from "@/components/LoadError";
 import { StatusDot } from "@/components/review";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,7 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { api, enc, type AskedQuestion, type EditKind, type InterviewDetail, type Link, type Speaker, type Turn } from "@/lib/api";
+import { api, enc, type AskedQuestion, type EditKind, type InterviewDetail, type Link, type Speaker, type Turn, type Word } from "@/lib/api";
 import { useStoredFlag } from "@/lib/compare";
 import { useFeedback } from "@/lib/feedback";
 import { clock, partAt, STATUS_LABEL, stamp, tagText } from "@/lib/format";
@@ -24,12 +25,15 @@ export function InterviewPage({ id, focusTurn }: { id: string; focusTurn: number
   const { detail, dataVersion } = useProject();
   const { fail } = useFeedback();
   const [d, setD] = useState<InterviewDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       setD(await api<InterviewDetail>("GET", `/api/interviews/${enc(id)}`));
+      setError(null);
     } catch (e) {
       fail(e);
+      setError(e instanceof Error ? e.message : String(e));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -38,7 +42,8 @@ export function InterviewPage({ id, focusTurn }: { id: string; focusTurn: number
     void load();
   }, [load, dataVersion]);
 
-  if (!d) return <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
+  if (!d)
+    return error ? <LoadError message={error} onRetry={() => void load()} /> : <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
   return (
     <ReviewProvider guide={detail!.guide} onChanged={load}>
       <Transcript d={d} focusTurn={focusTurn} onChanged={load} />
@@ -47,6 +52,28 @@ export function InterviewPage({ id, focusTurn }: { id: string; focusTurn: number
 }
 
 const ROLE_LABEL: Record<string, string> = { interviewer: "Interviewer", interviewee: "Befragte:r", unknown: "unbekannt" };
+
+/**
+ * The words one edit dialog created: the word at `first`..`last`, widened to whole edit groups. A group is a
+ * replacement word followed by the words it deleted, with the same kind and tag. Edits store no group id, so
+ * the run is found from the words alone.
+ */
+function widenToEditGroups(words: Word[], first: number, last: number): [number, number] {
+  let a = first;
+  let b = last;
+  for (let i = first; i <= last; i++) {
+    const w = words[i];
+    if (w.k === undefined) continue;
+    const same = (x: Word | undefined) => x !== undefined && x.k === w.k && x.g === w.g;
+    let s = i;
+    while (words[s].t === "" && same(words[s - 1])) s--;
+    let e = i;
+    while (e + 1 < words.length && words[e + 1].t === "" && same(words[e + 1])) e++;
+    a = Math.min(a, s);
+    b = Math.max(b, e);
+  }
+  return [a, b];
+}
 
 type Mode = "read" | "correct" | "smooth";
 const MODES: { id: Mode; label: string; hint: string }[] = [
@@ -69,7 +96,7 @@ interface EditDraft {
 }
 
 function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn: number | null; onChanged: () => void }) {
-  const { detail, source } = useProject();
+  const { detail, source, dataVersion } = useProject();
   const review = useReview();
   const { confirm, fail, notify } = useFeedback();
   const player = usePlayer();
@@ -80,7 +107,14 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
   const [mode, setMode] = useState<Mode>("read");
   const [showEdits, setShowEdits] = useStoredFlag("interis.showEdits", false);
   const [edit, setEdit] = useState<EditDraft | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const speakers = useMemo(() => Object.fromEntries(d.speakers.map((s) => [s.label, s])), [d.speakers]);
+
+  // the transcript changed under the open dialog (a job finished): its word positions may have moved
+  useEffect(() => {
+    setEdit(null);
+  }, [dataVersion]);
 
   // questions and confirmed links per turn
   const qByTurn = useMemo(() => group(d.questions, (q) => q.turn), [d.questions]);
@@ -120,6 +154,11 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
           .map((w) => w.t)
           .join("")
           .trim();
+        // only deleted words selected: nothing visible to act on
+        if (!text) {
+          setSel(null);
+          return;
+        }
         const r = s.getRangeAt(0).getBoundingClientRect();
         setSel({ span: { turn, first, last, text }, x: r.left, y: r.top });
       }, 0);
@@ -134,21 +173,29 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
     };
   }, [d.turns, fail]);
 
+  // The dialog always works on whole edit groups: a word that already has an edit opens the group it belongs to.
   const openEdit = useCallback(
     (span: Span, action: "replace" | "delete", kind: EditKind) => {
-      const words = d.turns[span.turn].words.slice(span.first, span.last + 1);
+      const words = d.turns[span.turn].words;
+      const [first, last] = widenToEditGroups(words, span.first, span.last);
+      const group = words.slice(first, last + 1);
+      const current = group
+        .map((w) => w.t)
+        .join("")
+        .trim();
+      setEditError(null);
       setEdit({
-        span,
-        original: words
+        span: { turn: span.turn, first, last, text: current },
+        original: group
           .map((w) => w.o ?? w.t)
           .join("")
           .trim(),
-        lead: (words[0]?.o ?? words[0]?.t ?? "").match(/^\s*/)?.[0] ?? "",
+        lead: (group[0]?.o ?? group[0]?.t ?? "").match(/^\s*/)?.[0] ?? "",
         action,
         kind,
-        text: action === "replace" ? span.text : "",
+        text: action === "replace" ? current : "",
         tag: "",
-        hasEdits: d.edits.some((e) => e.turn === span.turn && e.word >= span.first && e.word <= span.last),
+        hasEdits: group.some((w) => w.k !== undefined),
       });
     },
     [d],
@@ -157,16 +204,17 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
   const onWordClick = useCallback(
     (ti: number, wi: number) => {
       if (window.getSelection()?.isCollapsed === false) return;
-      const w = d.turns[ti].words[wi];
-      if (mode === "correct") openEdit({ turn: ti, first: wi, last: wi, text: w.t.trim() }, "replace", "correction");
-      else player.play(source(d.id), w.s + 0.15);
+      if (mode === "correct") openEdit({ turn: ti, first: wi, last: wi, text: "" }, "replace", "correction");
+      else player.play(source(d.id), d.turns[ti].words[wi].s + 0.15);
     },
     [mode, d, openEdit, player, source],
   );
 
   const saveEdit = async () => {
-    if (!edit) return;
+    if (!edit || busy) return;
     const { span, action, kind, text, tag, lead } = edit;
+    setBusy(true);
+    setEditError(null);
     try {
       await api("POST", `/api/interviews/${enc(d.id)}/edits`, {
         turn: span.turn,
@@ -181,19 +229,26 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
       notify("Änderung gespeichert");
       onChanged();
     } catch (e) {
-      fail(e);
+      // the backend's message (for example the 409 for a word that already has another kind of edit) stays in the dialog
+      setEditError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
     }
   };
 
   const revertEdit = async () => {
-    if (!edit) return;
+    if (!edit || busy) return;
+    setBusy(true);
+    setEditError(null);
     try {
       await api("POST", `/api/interviews/${enc(d.id)}/edits/revert`, { turn: edit.span.turn, first: edit.span.first, last: edit.span.last });
       setEdit(null);
       notify("Änderung zurückgenommen");
       onChanged();
     } catch (e) {
-      fail(e);
+      setEditError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -351,11 +406,12 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
           <p>Text mit der Maus markieren → „Als Frage markieren“, „Antwort auf Frage …“ oder „Als Extrakt übernehmen …“.</p>
           <p>Auf ein Wort klicken → ab dort anhören (Modus „Lesen“).</p>
           <p>
-            <span className="word-low">unterstrichen</span> = unsicher erkannt
+            <span className="word-low">gepunktet unterstrichen</span> = unsicher erkannt
           </p>
           <p>
             <span className="underline decoration-question decoration-2 underline-offset-2">unterstrichen</span> = korrigiert,{" "}
-            <span className="line-through">durchgestrichen</span> = geglättet (bei „Änderungen anzeigen“)
+            <span className="underline decoration-dashed decoration-muted-foreground decoration-2 underline-offset-2">gestrichelt unterstrichen</span>{" "}
+            = geglättet ersetzt, <span className="line-through">durchgestrichen</span> = entfernt (Korrektur oder Glättung; bei „Änderungen anzeigen“)
           </p>
         </div>
       </aside>
@@ -441,7 +497,7 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
         </div>
       )}
 
-      <EditDialog edit={edit} setEdit={setEdit} tags={detail!.tags} onSave={saveEdit} onRevert={revertEdit} />
+      <EditDialog edit={edit} setEdit={setEdit} tags={detail!.tags} busy={busy} error={editError} onSave={saveEdit} onRevert={revertEdit} />
     </div>
   );
 }
@@ -450,12 +506,16 @@ function EditDialog({
   edit,
   setEdit,
   tags,
+  busy,
+  error,
   onSave,
   onRevert,
 }: {
   edit: EditDraft | null;
   setEdit: (e: EditDraft | null) => void;
   tags: string[];
+  busy: boolean;
+  error: string | null;
   onSave: () => void;
   onRevert: () => void;
 }) {
@@ -480,7 +540,13 @@ function EditDialog({
             {edit.action === "replace" && (
               <div className="grid gap-2">
                 <Label htmlFor="edit-text">{edit.kind === "correction" ? "Richtiger Text" : "Neuer Text"}</Label>
-                <Input id="edit-text" autoFocus value={edit.text} onChange={(e) => setEdit({ ...edit, text: e.target.value })} />
+                <Input
+                  id="edit-text"
+                  autoFocus
+                  maxLength={200}
+                  value={edit.text}
+                  onChange={(e) => setEdit({ ...edit, text: e.target.value })}
+                />
                 {edit.kind === "correction" && edit.span.last > edit.span.first && (
                   <p className="text-muted-foreground text-xs">Mehrere Wörter: Die übrigen Wörter der Markierung werden leer.</p>
                 )}
@@ -503,10 +569,11 @@ function EditDialog({
                 </Select>
               </div>
             )}
+            {error && <p className="text-destructive text-sm whitespace-pre-line">{error}</p>}
             <DialogFooter className="sm:justify-between">
               <div>
                 {edit.hasEdits && (
-                  <Button variant="ghost" onClick={onRevert}>
+                  <Button variant="ghost" disabled={busy} onClick={onRevert}>
                     <Undo2Icon />
                     Änderung zurücknehmen
                   </Button>
@@ -516,7 +583,7 @@ function EditDialog({
                 <Button variant="outline" onClick={() => setEdit(null)}>
                   Abbrechen
                 </Button>
-                <Button disabled={!valid} onClick={onSave}>
+                <Button disabled={!valid || busy} onClick={onSave}>
                   Speichern
                 </Button>
               </div>
@@ -570,10 +637,12 @@ const TurnRow = memo(function TurnRow({
           const startQ = questions?.find((x) => x.first === wi);
           const startLinks = links?.filter((l) => l.first === wi) ?? [];
           const inLink = links?.some((l) => l.first <= wi && wi <= l.last);
-          // edited words: a correction shows the new text underlined, a smoothing deletion shows the original struck through
+          // edited words: a deletion (either kind) shows the original struck through; a replacement shows the new
+          // text underlined, in the correction colour or, for smoothing, dashed
           const edited = w.k !== undefined;
           const struck = showEdits && edited && w.t === "";
-          const underlined = showEdits && edited && w.t !== "";
+          const corrected = showEdits && edited && w.t !== "" && w.k === "correction";
+          const smoothed = showEdits && edited && w.t !== "" && w.k === "smoothing";
           const title = edited
             ? `${w.k === "smoothing" ? `Glättung (${w.g ?? ""})` : "Korrektur"} – Original: „${w.o ?? ""}“`
             : w.p < 0.5
@@ -614,7 +683,8 @@ const TurnRow = memo(function TurnRow({
                   q && (q.guide_code && q.match !== "followup" ? "text-question font-medium" : "font-medium"),
                   inLink && "bg-linked-soft",
                   w.p < 0.5 && !edited && "word-low",
-                  underlined && "decoration-question underline decoration-2 underline-offset-2",
+                  corrected && "decoration-question underline decoration-2 underline-offset-2",
+                  smoothed && "underline decoration-dashed decoration-muted-foreground decoration-2 underline-offset-2",
                   struck && "text-muted-foreground",
                 )}
               >

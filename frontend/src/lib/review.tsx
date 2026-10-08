@@ -30,6 +30,8 @@ export type DragPayload = { kind: "question" | "answer"; interview: string; turn
 
 export function dragStart(e: DragEvent, payload: DragPayload) {
   e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(payload));
+  // the kind also travels as a type of its own: during dragover the data cannot be read, only the types
+  e.dataTransfer.setData(`${DRAG_TYPE}-${payload.kind}`, "1");
   e.dataTransfer.effectAllowed = "copy";
 }
 
@@ -76,9 +78,13 @@ type Open =
 export function ReviewProvider({ guide, onChanged, children }: { guide: Guide | null; onChanged: () => void; children: ReactNode }) {
   const { notify, fail } = useFeedback();
   const [open, setOpen] = useState<Open | null>(null);
+  const [busy, setBusy] = useState(false);
   const questions = guide?.questions ?? [];
 
+  // one request at a time: the buttons are disabled while busy, the guard covers a fast second click
   const save = async (fn: () => Promise<unknown>, msg: string) => {
+    if (busy) return;
+    setBusy(true);
     try {
       await fn();
       setOpen(null);
@@ -86,6 +92,8 @@ export function ReviewProvider({ guide, onChanged, children }: { guide: Guide | 
       onChanged();
     } catch (e) {
       fail(e);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -160,7 +168,7 @@ export function ReviewProvider({ guide, onChanged, children }: { guide: Guide | 
                   Abbrechen
                 </Button>
                 <Button
-                  disabled={!open.code}
+                  disabled={!open.code || busy}
                   onClick={() =>
                     save(
                       () =>
@@ -206,6 +214,7 @@ export function ReviewProvider({ guide, onChanged, children }: { guide: Guide | 
                 <div className="flex gap-2">
                   <Button
                     variant="outline"
+                    disabled={busy}
                     onClick={() =>
                       save(
                         () =>
@@ -227,6 +236,7 @@ export function ReviewProvider({ guide, onChanged, children }: { guide: Guide | 
                   {open.q.status === "confirmed" && (
                     <Button
                       variant="ghost"
+                      disabled={busy}
                       onClick={() =>
                         save(
                           () => api("POST", "/api/questions/reset", { interview: open.interview, turn: open.q.turn, first: open.q.first }),
@@ -243,6 +253,7 @@ export function ReviewProvider({ guide, onChanged, children }: { guide: Guide | 
                     Abbrechen
                   </Button>
                   <Button
+                    disabled={busy}
                     onClick={() => {
                       const code = open.code === NONE ? null : open.code;
                       void save(
@@ -288,6 +299,7 @@ export function ReviewProvider({ guide, onChanged, children }: { guide: Guide | 
                   {open.had && (
                     <Button
                       variant="ghost"
+                      disabled={busy}
                       onClick={() =>
                         save(
                           () => api("PUT", `/api/interviews/${enc(open.interview)}/questions/${enc(open.code)}/decision`, { reason: null, note: "" }),
@@ -304,7 +316,7 @@ export function ReviewProvider({ guide, onChanged, children }: { guide: Guide | 
                     Abbrechen
                   </Button>
                   <Button
-                    disabled={!open.reason}
+                    disabled={!open.reason || busy}
                     onClick={() =>
                       save(
                         () =>
@@ -339,7 +351,7 @@ export function ReviewProvider({ guide, onChanged, children }: { guide: Guide | 
                   Abbrechen
                 </Button>
                 <Button
-                  disabled={!open.code}
+                  disabled={!open.code || !open.paraphrase.trim() || busy}
                   onClick={() =>
                     save(
                       () =>

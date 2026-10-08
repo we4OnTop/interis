@@ -39,20 +39,13 @@ export function bytes(n: number | null): string {
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
+/** The one name per cell status, used everywhere (badges, sidebar, question view, docs). */
 export const STATUS_LABEL: Record<CellStatus, string> = {
   asked: "gestellt",
   answered_elsewhere: "anderswo beantwortet",
   omitted: "weggelassen – schon beantwortet",
   explained: "nicht gestellt – begründet",
   missing: "fehlt – begründen",
-};
-
-export const STATUS_SHORT: Record<CellStatus, string> = {
-  asked: "gestellt",
-  answered_elsewhere: "anderswo",
-  omitted: "weggelassen",
-  explained: "begründet",
-  missing: "fehlt",
 };
 
 export const REASON_LABEL: Record<DecisionReason, string> = {

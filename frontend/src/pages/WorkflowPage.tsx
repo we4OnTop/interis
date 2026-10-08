@@ -1,27 +1,24 @@
 import { useCallback, useEffect, useState } from "react";
 import { CheckIcon, CircleAlertIcon, LoaderIcon, MinusIcon } from "lucide-react";
 
+import { LoadError } from "@/components/LoadError";
 import { Badge } from "@/components/ui/badge";
 import { api, type Workflow, type WorkflowInterview } from "@/lib/api";
 import { useFeedback } from "@/lib/feedback";
 import { useProject } from "@/lib/project";
 import { href } from "@/lib/router";
 
-// Column per step that has a done rule on the server (see web/workflow.py). The guide step is project-wide
-// and the export step has no state, so both are only described in the step cards.
+// Column per step. The done flags come from the server (web/workflow.py); the column titles are the step titles.
+// The guide step is project-wide and the export step has no state, so both are only described in the step cards.
 // done: null = informational only (shows `info` instead of a check or dash)
-const COLUMNS: { id: string; label: string; done: (iv: WorkflowInterview) => boolean | null; info?: (iv: WorkflowInterview) => string }[] = [
-  { id: "transcribe", label: "Transkribiert", done: (iv) => iv.transcribed },
-  { id: "correct", label: "Korrigiert", done: (iv) => iv.reviewed },
-  { id: "smooth", label: "Geglättet (optional)", done: (iv) => iv.smoothing > 0 },
-  {
-    id: "assign",
-    label: "Fragen zugeordnet",
-    done: () => null,
-    info: (iv) => `${iv.asked} gestellt · ${iv.unassigned} spontan`,
-  },
-  { id: "explain", label: "Fehlende geklärt", done: (iv) => (iv.transcribed ? iv.missing.length === 0 : null) },
-  { id: "extract", label: "Extrahiert", done: (iv) => iv.extracts > 0 },
+const COLUMNS: { id: string; done: (iv: WorkflowInterview) => boolean | null; info?: (iv: WorkflowInterview) => string }[] = [
+  { id: "transcribe", done: (iv) => iv.done.transcribe },
+  { id: "correct", done: (iv) => iv.done.correct },
+  { id: "smooth", done: (iv) => iv.done.smooth },
+  { id: "assign", done: () => null, info: (iv) => `${iv.asked} gestellt · ${iv.unassigned} spontan` },
+  // an interview that is not transcribed yet has nothing to explain
+  { id: "explain", done: (iv) => (iv.transcribed ? iv.done.explain : null) },
+  { id: "extract", done: (iv) => iv.done.extract },
 ];
 
 export function WorkflowPage() {
@@ -29,12 +26,15 @@ export function WorkflowPage() {
   const { fail } = useFeedback();
   const pid = detail!.project.id;
   const [wf, setWf] = useState<Workflow | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
       setWf(await api<Workflow>("GET", `/api/projects/${pid}/workflow`));
+      setError(null);
     } catch (e) {
       fail(e);
+      setError(e instanceof Error ? e.message : String(e));
     }
   }, [pid, fail]);
 
@@ -42,7 +42,8 @@ export function WorkflowPage() {
     void load();
   }, [load, dataVersion, detail?.guide_text]);
 
-  if (!wf) return <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
+  if (!wf)
+    return error ? <LoadError message={error} onRetry={() => void load()} /> : <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
 
   return (
     <div className="mx-auto max-w-6xl space-y-8 p-4 sm:p-6">
@@ -86,7 +87,7 @@ export function WorkflowPage() {
                   <th className="px-3 py-2">Gespräch</th>
                   {COLUMNS.map((c) => (
                     <th key={c.id} className="px-3 py-2 text-center">
-                      {c.label}
+                      {wf.steps.find((s) => s.id === c.id)?.title ?? c.id}
                     </th>
                   ))}
                   <th className="px-3 py-2">Hinweise</th>
@@ -120,7 +121,7 @@ export function WorkflowPage() {
                           </Badge>
                         )}
                         {iv.transcribed && iv.missing.length > 0 && (
-                          <span className="text-xs">offen: {iv.missing.join(", ")}</span>
+                          <span className="text-xs">fehlt – begründen: {iv.missing.join(", ")}</span>
                         )}
                       </div>
                     </td>
