@@ -24,6 +24,7 @@ export function settingsSummary(s: Partial<TranscriptionSettings>): string {
     s.compute_type === "float32" ? "float32" : null,
     s.beam_size && s.beam_size !== 5 ? `Beam ${s.beam_size}` : null,
     s.room_mic ? "Raummikrofon" : null,
+    s.dereverb ? `Hall ↓ (${s.wpe_taps}/${s.wpe_delay}/${s.wpe_iterations})` : null,
     s.vad_threshold != null ? `VAD ${s.vad_threshold}` : null,
     s.speakers === 0 ? "Sprecher auto" : s.speakers && s.speakers !== 2 ? `${s.speakers} Sprecher` : null,
     s.min_duration_off != null ? `Pausen ${s.min_duration_off} s` : null,
@@ -299,6 +300,53 @@ export function TranscriptionTab() {
                 </span>
               </span>
             </label>
+            <div className="grid content-start gap-2 sm:col-span-2 lg:col-span-3 rounded-md border p-3">
+              <label className="flex items-start gap-2 text-sm">
+                <Checkbox className="mt-0.5" checked={form.dereverb} onCheckedChange={(c) => set("dereverb", c === true)} />
+                <span>
+                  Hall reduzieren (WPE, experimentell)
+                  <span className="text-muted-foreground block text-xs">
+                    Sagt den Nachhall aus dem eigenen Signal voraus und zieht ihn ab, vor Spracherkennung und Sprechertrennung. Ohne
+                    trainiertes Modell. Mit einem Mikrofon ist der Effekt eher klein: unbedingt per Probelauf vergleichen. Kostet etwa
+                    0,2–2 min Rechenzeit pro 10 min Audio, grob gemessen.
+                  </span>
+                </span>
+              </label>
+              {form.dereverb && (
+                <div className="grid gap-x-6 gap-y-4 pl-6 sm:grid-cols-3">
+                  <NumberField
+                    id="taps"
+                    label="Nachhall-Länge (Taps)"
+                    value={form.wpe_taps}
+                    onChange={(v) => set("wpe_taps", v ?? 10)}
+                    min={3}
+                    max={40}
+                    step={1}
+                    help="In Schritten zu 8 ms. 10 ≈ 80 ms (Standard); höher für hallige Räume, rechnet länger."
+                  />
+                  <NumberField
+                    id="delay"
+                    label="Verzögerung"
+                    value={form.wpe_delay}
+                    onChange={(v) => set("wpe_delay", v ?? 3)}
+                    min={1}
+                    max={8}
+                    step={1}
+                    help="So viele 8-ms-Schritte bleiben als direkter Schall unangetastet. 3 = Standard."
+                  />
+                  <NumberField
+                    id="iter"
+                    label="Durchläufe"
+                    value={form.wpe_iterations}
+                    onChange={(v) => set("wpe_iterations", v ?? 3)}
+                    min={1}
+                    max={10}
+                    step={1}
+                    help="Wie oft der Filter neu geschätzt wird. 3 = Standard; mehr bringt selten etwas."
+                  />
+                </div>
+              )}
+            </div>
             <NumberField
               id="vad"
               label="Sprach-Empfindlichkeit (VAD)"

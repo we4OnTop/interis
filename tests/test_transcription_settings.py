@@ -45,6 +45,9 @@ def test_presets_and_the_default_used_by_a_new_transcription(tmp_path):
     assert args[args.index("--speakers") + 1] == "3" and "--room-mic" in args
     assert args[args.index("--min-duration-off") + 1] == "0.5"
     assert "--vad-threshold" not in args  # not set: the CLI's default
+    assert "--dereverb" not in args and "--wpe-taps" not in args
+    wpe = settings_args({"dereverb": True, "wpe_taps": 20})
+    assert wpe[wpe.index("--wpe-taps") + 1] == "20" and wpe[wpe.index("--wpe-delay") + 1] == "3"
 
     c.delete(f"/api/transcription/presets/{pid}", headers=H)
     assert c.get("/api/transcription/settings").json()["default"]["preset"] == "Standard"

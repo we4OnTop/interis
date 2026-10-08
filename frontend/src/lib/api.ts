@@ -47,6 +47,11 @@ export interface TranscriptionSettings {
   speakers: number;
   /** seconds; null: the model's setting */
   min_duration_off: number | null;
+  /** reduce reverberation (WPE) */
+  dereverb: boolean;
+  wpe_taps: number;
+  wpe_delay: number;
+  wpe_iterations: number;
 }
 
 export interface Preset {

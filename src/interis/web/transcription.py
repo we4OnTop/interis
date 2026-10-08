@@ -35,6 +35,10 @@ class TranscriptionSettings(BaseModel):
     vad_threshold: float | None = Field(default=None, ge=0.1, le=0.9)
     speakers: int = Field(default=2, ge=0, le=8)  # 0: detect the number
     min_duration_off: float | None = Field(default=None, ge=0.0, le=2.0)
+    dereverb: bool = False  # WPE, see interis.pipeline.dereverb
+    wpe_taps: int = Field(default=10, ge=3, le=40)
+    wpe_delay: int = Field(default=3, ge=1, le=8)
+    wpe_iterations: int = Field(default=3, ge=1, le=10)
 
     def checked(self) -> dict[str, Any]:
         if self.model not in ASR_MODELS:

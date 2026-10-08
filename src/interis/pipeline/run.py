@@ -52,6 +52,8 @@ class PipelineOptions:
     min_duration_off: float | None = None
     # (start, length) in seconds: transcribe only this excerpt, e.g. to compare settings
     clip: tuple[float, float] | None = None
+    # (taps, delay, iterations): reduce reverberation with WPE before all models
+    dereverb: tuple[int, int, int] | None = None
     interview_id: str | None = None
     analysis: AnalysisOptions = field(default_factory=AnalysisOptions)
 
@@ -107,16 +109,32 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
         cache = StepCache(paths.cache, audio_sha)
     duration = len(audio) / SAMPLE_RATE
 
+    memo: dict[str, np.ndarray] = {}
+
+    def heard() -> np.ndarray:
+        """The audio the models get: reverberation reduced if asked, computed only when a
+        step is not cached."""
+        if not opts.dereverb:
+            return audio
+        if "x" not in memo:
+            from interis.pipeline.dereverb import dereverb
+
+            memo["x"] = dereverb(audio, *opts.dereverb, progress=say)
+        return memo["x"]
+
+    # options left at their default are not part of the keys: earlier caches stay valid
+    extra = {"dereverb": list(opts.dereverb)} if opts.dereverb else {}
+
     # --- transcribe
     asr_dir = verify_ready(paths, opts.asr_model)
     asr_params = {"model": opts.asr_model, "revision": MODELS[opts.asr_model].revision,
-                  "fw": version("faster-whisper"), **opts.asr.as_params()}
+                  "fw": version("faster-whisper"), **opts.asr.as_params(), **extra}
     asr_key = params_key(asr_params)
     cached = cache.load("asr", asr_key)
     if cached is None:
         from interis.pipeline.asr import transcribe
 
-        segments = transcribe(audio, asr_dir, opts.asr, say)
+        segments = transcribe(heard(), asr_dir, opts.asr, say)
         cache.save("asr", asr_key, [to_dict(s) for s in segments])
     else:
         segments = [Segment.from_dict(s) for s in cached]
@@ -131,7 +149,7 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
             from interis.pipeline.align import align
 
             model_dir = verify_ready(paths, ALIGN_MODEL)
-            segments = align(audio, segments, model_dir, opts.asr.threads, say)
+            segments = align(heard(), segments, model_dir, opts.asr.threads, say)
             cache.save("align", align_key, [to_dict(s) for s in segments])
         else:
             segments = [Segment.from_dict(s) for s in cached]
@@ -141,8 +159,9 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
     diarization: Diarization | None = None
     if opts.diarize:
         diar_params = {"revision": MODELS[DIARIZATION_MODEL].revision,
-                       "num_speakers": opts.num_speakers, "pyannote": version("pyannote.audio")}
-        if opts.asr.room_mic:  # (only set options are keyed: earlier caches stay valid)
+                       "num_speakers": opts.num_speakers, "pyannote": version("pyannote.audio"),
+                       **extra}
+        if opts.asr.room_mic:
             diar_params["room_mic"] = True
         if opts.min_duration_off is not None:
             diar_params["min_duration_off"] = opts.min_duration_off
@@ -153,7 +172,7 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
             from interis.pipeline.diarize import diarize
 
             model_dir = verify_ready(paths, DIARIZATION_MODEL)
-            diarization = diarize(level(audio) if opts.asr.room_mic else audio, model_dir,
+            diarization = diarize(level(heard()) if opts.asr.room_mic else heard(), model_dir,
                                   opts.num_speakers, say, opts.min_duration_off)
             cache.save("diarize", diar_key, to_dict(diarization))
         else:
@@ -185,6 +204,7 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
             "asr_model": opts.asr_model, **opts.asr.as_params(),
             "align": opts.align, "diarize": opts.diarize, "num_speakers": opts.num_speakers,
             "min_duration_off": opts.min_duration_off, "vad_threshold": opts.asr.vad,
+            "dereverb": list(opts.dereverb) if opts.dereverb else None,
             "condition_on_previous_text": False, "vad_filter": True, "language": "de",
         },
         "packages": {p: version(p) for p in _PACKAGES},

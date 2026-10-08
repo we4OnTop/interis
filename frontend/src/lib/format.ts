@@ -72,6 +72,7 @@ export const STAGE_LABEL: Record<string, string> = {
   start: "Start, Modelle laden",
   hash: "Dateien prüfen",
   decode: "Audio lesen",
+  dereverb: "Hall reduzieren",
   transcribe: "Spracherkennung",
   align: "Wörter ausrichten",
   diarize: "Sprechertrennung",

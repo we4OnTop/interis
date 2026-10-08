@@ -42,6 +42,10 @@ def settings_args(options: dict) -> list[str]:
             args += [flag, str(options[key])]
     if options.get("room_mic") is True:
         args.append("--room-mic")
+    if options.get("dereverb") is True:
+        args += ["--dereverb", "--wpe-taps", str(int(options.get("wpe_taps", 10))),
+                 "--wpe-delay", str(int(options.get("wpe_delay", 3))),
+                 "--wpe-iterations", str(int(options.get("wpe_iterations", 3)))]
     return args
 
 

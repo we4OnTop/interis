@@ -249,6 +249,7 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
         diarize=not args.no_diarize,
         num_speakers=args.speakers or None,
         min_duration_off=args.min_duration_off,
+        dereverb=(args.wpe_taps, args.wpe_delay, args.wpe_iterations) if args.dereverb else None,
         clip=(args.start, args.duration) if args.duration else None,
         interview_id=args.id,
         analysis=_analysis_options(args, paths, redo_roles=True),
@@ -326,6 +327,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-duration-off", type=float,
                    help="speaker diarization: bridge pauses of one speaker shorter than this "
                         "(seconds, default: the model's setting)")
+    p.add_argument("--dereverb", action="store_true",
+                   help="reduce reverberation (WPE) before recognition and diarization")
+    p.add_argument("--wpe-taps", type=int, default=10,
+                   help="WPE: length of the predicted reverberation, in 8 ms frames")
+    p.add_argument("--wpe-delay", type=int, default=3,
+                   help="WPE: frames kept as direct sound before the prediction starts")
+    p.add_argument("--wpe-iterations", type=int, default=3, help="WPE: estimation rounds")
     p.add_argument("--start", type=float, default=0.0, help="excerpt: start in seconds")
     p.add_argument("--duration", type=float, help="excerpt: length in seconds (default: all)")
     p.add_argument("--out", help="trial run: write only this JSON file; the interview, its "
