@@ -170,6 +170,12 @@ class SpeakerUpdate(WordRange):
     speaker: str | None = Field(default=None, max_length=60)  # None: diarization's speaker
 
 
+class ReferenceRequest(BaseModel):
+    until: float = Field(ge=10, le=3600)  # the checked reference: start up to this second
+    margin: float = Field(default=0.1, ge=0.0, le=0.5)
+    min_seconds: float = Field(default=1.0, ge=0.3, le=5.0)
+
+
 class ReviewedUpdate(BaseModel):
     reviewed: bool
 
@@ -742,7 +748,8 @@ def create_app(paths: Paths, login_token: str, port: int,
         guide = _guide_of(interview)
         state = _state_of(interview, t, guide)
         effective = apply_edits(t, edits, moved)
-        corrected = {(s["turn"], s["word"]) for s in moved}
+        corrected = {(s["turn"], s["word"]): 2 if s["source"] == "reference" else 1
+                     for s in moved}
         codes = {q.code for q in guide.questions} if guide else set()
         turns = []
         for ti, tu in enumerate(effective.turns):
@@ -757,8 +764,8 @@ def create_app(paths: Paths, login_token: str, port: int,
                         item["g"] = e["tag"]
                 if w.speaker and w.speaker != tu.speaker:  # said by another speaker
                     item["sp"] = w.speaker
-                if (ti, wi) in corrected:
-                    item["so"] = 1  # speaker corrected by hand
+                if (ti, wi) in corrected:  # speaker corrected: 1 by hand, 2 by voice
+                    item["so"] = corrected[(ti, wi)]
                 words.append(item)
             turns.append({"speaker": tu.speaker, "start": tu.start, "end": tu.end,
                           "words": words})
@@ -846,6 +853,29 @@ def create_app(paths: Paths, login_token: str, port: int,
         with write_lock:
             _not_transcribing(interview)
             store.set_speakers(interview, body.turn, change)
+        return {"ok": True}
+
+    @app.post("/api/interviews/{interview}/speakers/reference")
+    def speakers_by_reference(interview: str, body: ReferenceRequest) -> dict[str, int]:
+        """Assign the speakers after the reference stretch by voice (a background job; see
+        interis.analysis.speakers). Its result replaces earlier results of this kind."""
+        _interview_in_project(interview)
+        _transcript(interview)
+        parts = store.parts(interview)
+        if not parts or not all(p["path"].is_file() for p in parts):
+            raise HTTPException(422, "Die Aufnahme fehlt im Datenordner")
+        with write_lock:
+            _not_busy(interview)
+            job_id = store.add_job("speakers", interview, body.model_dump())
+        runner.notify()
+        return {"job": job_id}
+
+    @app.delete("/api/interviews/{interview}/speakers/reference")
+    def undo_speakers_by_reference(interview: str) -> dict[str, bool]:
+        _transcript(interview)
+        with write_lock:
+            _not_transcribing(interview)
+            store.set_reference_speakers(interview, [])
         return {"ok": True}
 
     @app.post("/api/interviews/{interview}/analyze")

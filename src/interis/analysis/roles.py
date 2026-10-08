@@ -33,8 +33,8 @@ def _cos(a: np.ndarray, b: np.ndarray) -> float:
     return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
 
 
-def voice_embedding(audio: np.ndarray, pyannote_dir: Path) -> np.ndarray:
-    """Embedding of a whole enrollment recording with community-1's embedding model."""
+def voice_embedder(pyannote_dir: Path):
+    """community-1's speaker embedding model, as a function: 16 kHz audio -> vector."""
     require_offline()
     ckpt = pyannote_dir / "embedding" / "pytorch_model.bin"
     assert_safe_checkpoint(ckpt)
@@ -43,8 +43,17 @@ def voice_embedding(audio: np.ndarray, pyannote_dir: Path) -> np.ndarray:
 
     model = Model.from_pretrained(pyannote_dir / "embedding")
     inference = Inference(model, window="whole")
-    waveform = torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32)).unsqueeze(0)
-    return np.asarray(inference({"waveform": waveform, "sample_rate": 16000})).ravel()
+
+    def embed(audio: np.ndarray) -> np.ndarray:
+        waveform = torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32)).unsqueeze(0)
+        return np.asarray(inference({"waveform": waveform, "sample_rate": 16000})).ravel()
+
+    return embed
+
+
+def voice_embedding(audio: np.ndarray, pyannote_dir: Path) -> np.ndarray:
+    """Embedding of a whole enrollment recording with community-1's embedding model."""
+    return voice_embedder(pyannote_dir)(audio)
 
 
 def save_voice(path: Path, label: str, embedding: np.ndarray, model_revision: str) -> None:

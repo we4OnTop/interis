@@ -9,6 +9,7 @@ import {
   RefreshCwIcon,
   Undo2Icon,
   UserRoundIcon,
+  UsersRoundIcon,
 } from "lucide-react";
 
 import { LoadError } from "@/components/LoadError";
@@ -123,6 +124,7 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
   const [edit, setEdit] = useState<EditDraft | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [byVoice, setByVoice] = useState(false);
   const speakers = useMemo(() => Object.fromEntries(d.speakers.map((s) => [s.label, s])), [d.speakers]);
 
   // the transcript changed under the open dialog (a job finished): its word positions may have moved
@@ -376,6 +378,7 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
                 Analyse aktualisieren
               </Button>
             )}
+            {mode === "correct" && <SpeakersByVoice d={d} open={byVoice} setOpen={setByVoice} onChanged={onChanged} />}
           </div>
           <p className="text-muted-foreground text-xs">{MODES.find((m) => m.id === mode)?.hint}</p>
         </div>
@@ -570,6 +573,141 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
 
       <EditDialog edit={edit} setEdit={setEdit} tags={detail!.tags} busy={busy} error={editError} onSave={saveEdit} onRevert={revertEdit} />
     </div>
+  );
+}
+
+/** "Sprecher nach Stimme": the checked start of the interview teaches the voices, a background job assigns the
+ * rest. Its result shows as speaker corrections (dotted) that can be taken back as a whole or word by word. */
+function SpeakersByVoice({
+  d,
+  open,
+  setOpen,
+  onChanged,
+}: {
+  d: InterviewDetail;
+  open: boolean;
+  setOpen: (o: boolean) => void;
+  onChanged: () => void;
+}) {
+  const { interview } = useProject();
+  const { notify, fail, confirm } = useFeedback();
+  const [until, setUntil] = useState("1:00");
+  const [margin, setMargin] = useState("0.1");
+  const [minSeconds, setMinSeconds] = useState("1");
+  const job = interview(d.id)?.job;
+  const running = job?.kind === "speakers" && (job.status === "queued" || job.status === "running");
+  const assigned = d.turns.some((t) => t.words.some((w) => w.so === 2));
+  const failed = job?.kind === "speakers" && job.status === "failed";
+
+  const start = async () => {
+    const [m, s] = until.includes(":") ? until.split(":").map(Number) : [0, Number(until)];
+    const seconds = m * 60 + s;
+    if (!Number.isFinite(seconds) || seconds < 10) return fail(new Error("Referenz: mindestens 0:10, z. B. 1:00"));
+    try {
+      await api("POST", `/api/interviews/${enc(d.id)}/speakers/reference`, {
+        until: seconds,
+        margin: Number(margin),
+        min_seconds: Number(minSeconds),
+      });
+      notify("Läuft im Hintergrund – das Transkript aktualisiert sich danach von selbst");
+      setOpen(false);
+      onChanged();
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  const undo = async () => {
+    if (!(await confirm({ title: "Zuordnung nach Stimme zurücknehmen?", description: "Deine eigenen Sprecherkorrekturen bleiben.", confirm: "Zurücknehmen" })))
+      return;
+    try {
+      await api("DELETE", `/api/interviews/${enc(d.id)}/speakers/reference`);
+      notify("Zurückgenommen");
+      onChanged();
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  return (
+    <>
+      {running ? (
+        <Badge variant="suggest">
+          <LoaderIcon className="animate-spin" />
+          Sprecher nach Stimme {job.status === "running" && job.progress > 0 ? `${Math.round(job.progress * 100)} %` : "wartet"}
+        </Badge>
+      ) : (
+        <Button size="sm" variant="outline" onClick={() => setOpen(true)}>
+          <UsersRoundIcon />
+          Sprecher nach Stimme …
+        </Button>
+      )}
+      {failed && (
+        <Badge variant="destructive" title={job.message}>
+          fehlgeschlagen: {job.message}
+        </Badge>
+      )}
+      {!running && job?.kind === "speakers" && job.status === "done" && job.message && (
+        <span className="text-muted-foreground text-xs">{job.message}</span>
+      )}
+      {assigned && !running && (
+        <Button size="sm" variant="ghost" onClick={() => void undo()}>
+          <Undo2Icon />
+          Zuordnung nach Stimme zurücknehmen
+        </Button>
+      )}
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Sprecher nach Stimme zuordnen</DialogTitle>
+            <DialogDescription>
+              Du prüfst den Anfang, das Programm lernt daraus eure Stimmen und ordnet den Rest zu.
+            </DialogDescription>
+          </DialogHeader>
+          <ol className="list-decimal space-y-1 pl-5 text-sm">
+            <li>
+              Im Modus „Korrigieren“ den Anfang bis zur gewählten Zeit durchgehen und falsche Sprecher richtigstellen (Wörter markieren
+              oder auf den Namen klicken). Jede Person sollte dort einige ganze Sätze sprechen.
+            </li>
+            <li>Starten. Jeder spätere Satz geht an die Stimme, der er deutlich ähnlicher klingt.</li>
+            <li>
+              Ergebnis prüfen: Bei „Änderungen anzeigen“ sind so zugeordnete Wörter <span className="outline-linked/60 rounded-sm outline-1 outline-dotted">gepunktet</span>{" "}
+              umrandet. Einzelne Stellen korrigierst du wie gewohnt, alles auf einmal nimmt „Zuordnung nach Stimme zurücknehmen“ zurück.
+            </li>
+          </ol>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="grid content-start gap-1.5">
+              <Label htmlFor="ref-until">Referenz: Anfang bis</Label>
+              <Input id="ref-until" value={until} onChange={(e) => setUntil(e.target.value)} className="w-24" />
+              <p className="text-muted-foreground text-xs">min:s, z. B. 1:00. Länger = sicherer.</p>
+            </div>
+            <div className="grid content-start gap-1.5">
+              <Label htmlFor="ref-margin">Sicherheitsabstand</Label>
+              <Input id="ref-margin" type="number" min={0} max={0.5} step={0.05} value={margin} onChange={(e) => setMargin(e.target.value)} className="w-24" />
+              <p className="text-muted-foreground text-xs">Wie deutlich ein Satz einer Stimme ähnlicher sein muss. Höher = weniger, aber sicherere Änderungen.</p>
+            </div>
+            <div className="grid content-start gap-1.5">
+              <Label htmlFor="ref-min">Mindestlänge (s)</Label>
+              <Input id="ref-min" type="number" min={0.3} max={5} step={0.5} value={minSeconds} onChange={(e) => setMinSeconds(e.target.value)} className="w-24" />
+              <p className="text-muted-foreground text-xs">Kürzere Sätze („Ja.“, „Mhm.“) behalten ihren Sprecher.</p>
+            </div>
+          </div>
+          <p className="text-muted-foreground text-xs">
+            Läuft im Hintergrund, grob einige Minuten für ein einstündiges Gespräch. Ein neuer Lauf ersetzt das Ergebnis des vorigen; deine
+            eigenen Korrekturen bleiben immer.
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)}>
+              Abbrechen
+            </Button>
+            <Button onClick={() => void start()}>
+              <UsersRoundIcon />
+              Starten
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -793,7 +931,8 @@ const TurnRow = memo(function TurnRow({
                   corrected && "decoration-question underline decoration-2 underline-offset-2",
                   smoothed && "underline decoration-dashed decoration-muted-foreground decoration-2 underline-offset-2",
                   struck && "text-muted-foreground",
-                  showEdits && w.so && "outline-muted-foreground/50 outline-1 outline-dashed",
+                  showEdits && w.so === 1 && "outline-muted-foreground/50 outline-1 outline-dashed",
+                  showEdits && w.so === 2 && "outline-linked/60 outline-1 outline-dotted",
                 )}
               >
                 {struck ? <s>{w.o}</s> : w.t}

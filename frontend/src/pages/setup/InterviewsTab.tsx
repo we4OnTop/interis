@@ -118,7 +118,8 @@ function JobStatus({ iv }: { iv: InterviewRow }) {
       </div>
     );
   }
-  if (j && j.status === "failed")
+  // a failed voice assignment leaves the transcript as it was; the transcript page shows it
+  if (j && j.status === "failed" && j.kind !== "speakers")
     return (
       <div className="text-destructive flex items-start gap-1.5 text-sm" title={j.message}>
         <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />

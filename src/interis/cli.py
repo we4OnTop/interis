@@ -164,6 +164,63 @@ def _load_edits(path: str) -> tuple[list[dict], list[dict]]:
     return words, speakers
 
 
+def cmd_speakers(args: argparse.Namespace, paths: Paths) -> int:
+    """Speakers by reference (see interis.analysis.speakers): writes the proposed speaker
+    corrections to --out; the transcript itself is not changed."""
+    import numpy as np
+
+    from interis.analysis.roles import voice_embedder
+    from interis.analysis.sentences import split_sentences
+    from interis.analysis.speakers import reassign
+    from interis.models import DIARIZATION_MODEL, ModelError, sha256_file, verify_ready
+    from interis.pipeline.run import SAMPLE_RATE, decode
+    from interis.pipeline.types import Transcript
+    from interis.web.edits import apply_edits
+
+    raw = Transcript.from_dict(json.loads(Path(args.transcript).read_text(encoding="utf-8")))
+    parts = raw.meta["audio"].get("parts") or []
+    files = [Path(a) for a in args.audio]
+    try:
+        if len(files) != len(parts) or any(sha256_file(f) != p["sha256"]
+                                           for f, p in zip(files, parts, strict=True)):
+            raise ValueError("the recordings differ from the ones this transcript was made "
+                             "from")
+        words, moved = _load_edits(args.edits) if args.edits else ([], [])
+        model_dir = verify_ready(paths, DIARIZATION_MODEL)
+    except (OSError, ValueError, ModelError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    # the transcript's own timeline: every part at the offset it had when transcribed
+    audio = np.zeros(int(raw.meta["audio"]["duration_s"] * SAMPLE_RATE) + SAMPLE_RATE,
+                     np.float32)
+    for f, p in zip(files, parts, strict=True):
+        x = decode(f)
+        at = int(p["offset_s"] * SAMPLE_RATE)
+        audio[at:at + len(x)] = x[:len(audio) - at]
+    effective = apply_edits(raw, words, moved)
+    sentences = split_sentences(effective.turns)
+    embed = voice_embedder(model_dir)
+    progress = _progress_json() if args.progress_json else _progress_printer()
+
+    def words_of(s):
+        turn = effective.turns[s.turn]
+        return [(s.turn, i, turn.words[i]) for i in range(s.first, s.last + 1)]
+
+    try:
+        changes, stats = reassign(
+            sentences, words_of,
+            lambda a, b: embed(audio[int(a * SAMPLE_RATE):int(b * SAMPLE_RATE)]),
+            args.until, args.margin, args.min_seconds, lambda x: progress("speakers", x))
+    except ValueError as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        return 1
+    Path(args.out).write_text(json.dumps({"changes": changes, "stats": stats}),
+                              encoding="utf-8")
+    print(f"\nReferenz {stats['reference']} Sätze · geprüft {stats['checked']} · geändert "
+          f"{stats['changed']} · unsicher {stats['unsure']} · zu kurz {stats['short']}")
+    return 0
+
+
 def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
     from interis.models import ModelError
     from interis.pipeline.run import run_analysis
@@ -364,6 +421,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--threads", type=int, help="CPU threads (default: all)")
     _add_analysis_args(p)
     p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("speakers", help="assign speakers by voice, learned from a checked "
+                                         "reference stretch at the start (writes --out only)")
+    p.add_argument("transcript", help="path to <ID>.json")
+    p.add_argument("--audio", nargs="+", required=True, help="the interview's recordings, "
+                                                             "in order")
+    p.add_argument("--edits", help="word and speaker edits (JSON, as written by the website)")
+    p.add_argument("--until", type=float, default=60.0,
+                   help="the reference: from the start up to this second")
+    p.add_argument("--margin", type=float, default=0.1,
+                   help="how clearly a voice must match better than the other (cosine)")
+    p.add_argument("--min-seconds", type=float, default=1.0,
+                   help="shorter sentences keep their speaker")
+    p.add_argument("--out", required=True, help="JSON file for the proposed changes")
+    p.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_speakers)
 
     p = sub.add_parser("serve", help="open the review website (only reachable from this PC)")
     p.add_argument("--port", type=int, default=8765)

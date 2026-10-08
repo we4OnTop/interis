@@ -133,6 +133,18 @@ class JobRunner:
             iid = str(options["interview"])
         guide = self.guide_file(iid)
         guide_args = ["--guide", str(guide)] if guide else []
+        if job["kind"] == "speakers":
+            transcript = self.paths.exports / iid / f"{iid}.json"
+            if not transcript.is_file():
+                raise RuntimeError("Transkript nicht gefunden")
+            audio = self.store.part_paths(iid)
+            if not audio or not all(p.is_file() for p in audio):
+                raise RuntimeError("Audiodatei nicht gefunden")
+            return [*base, "speakers", str(transcript), "--audio", *map(str, audio),
+                    "--until", str(float(options["until"])),
+                    "--margin", str(float(options["margin"])),
+                    "--min-seconds", str(float(options["min_seconds"])),
+                    "--out", str(self._speakers_file(job)), "--progress-json"]
         if job["kind"] in ("transcribe", "trial"):
             audio = self.store.part_paths(iid)
             missing = [p.name for p in audio if not p.is_file()]
@@ -153,6 +165,10 @@ class JobRunner:
             raise RuntimeError("Transkript nicht gefunden")
         return [*base, "analyze", str(transcript), *guide_args]
 
+    def _speakers_file(self, job: dict) -> Path:
+        self.paths.tmp.mkdir(parents=True, exist_ok=True)
+        return self.paths.tmp / f"speakers-{int(job['id'])}.json"
+
     def _write_edits(self, job: dict, path: Path) -> bool:
         """The word and speaker edits of an interview as a temporary JSON file (no
         transcript text is logged). False if there are none."""
@@ -171,11 +187,13 @@ class JobRunner:
         edits_file = self.paths.tmp / f"edits-{job['id']}.json"
         try:
             # The analysis runs on the edited text; the transcript itself is never changed.
-            if job["kind"] == "analyze" and self._write_edits(job, edits_file):
+            if job["kind"] in ("analyze", "speakers") and self._write_edits(job, edits_file):
                 cmd = [*cmd, "--edits", str(edits_file)]
             self._execute(job, cmd)
         finally:
             edits_file.unlink(missing_ok=True)
+            if job["kind"] == "speakers":
+                self._speakers_file(job).unlink(missing_ok=True)
 
     def _execute(self, job: dict, cmd: list[str]) -> None:
         job_id = job["id"]
@@ -228,6 +246,9 @@ class JobRunner:
         elif code == 0:
             if job["kind"] == "transcribe":  # the new transcript replaces the old positions
                 self.store.delete_decisions(job["interview_id"])
+            if job["kind"] == "speakers":  # proposals become corrections you can take back
+                result = json.loads(self._speakers_file(job).read_text(encoding="utf-8"))
+                self.store.set_reference_speakers(job["interview_id"], result["changes"])
             self.store.update_job(job_id, status="done", progress=1.0,
                                   message=job_message(tail[-1]) if tail else "")
         else:

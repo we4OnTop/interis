@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS audio_parts (
 -- Transcriptions / re-analyses started from the website, run one at a time.
 CREATE TABLE IF NOT EXISTS jobs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind         TEXT NOT NULL CHECK (kind IN ('transcribe', 'analyze', 'models', 'trial')),
+    kind         TEXT NOT NULL CHECK (kind IN ('transcribe', 'analyze', 'models', 'trial',
+                                                  'speakers')),
     interview_id TEXT NOT NULL,
     options      TEXT NOT NULL DEFAULT '{}',
     status       TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed',
@@ -98,6 +99,7 @@ CREATE TABLE IF NOT EXISTS speaker_edits (
     turn         INTEGER NOT NULL,
     word         INTEGER NOT NULL,
     speaker      TEXT NOT NULL,
+    source       TEXT NOT NULL DEFAULT 'manual',  -- manual | reference (assigned by voice)
     updated_at   TEXT NOT NULL,
     PRIMARY KEY (interview_id, turn, word)
 );
@@ -147,7 +149,7 @@ class Store:
         with self._conn() as c:
             c.executescript(SCHEMA)
             sql = c.execute("SELECT sql FROM sqlite_master WHERE name = 'jobs'").fetchone()
-            if sql and "'trial'" not in sql["sql"]:  # databases from before trial runs
+            if sql and "'speakers'" not in sql["sql"]:  # databases before the newest kind
                 c.execute("ALTER TABLE jobs RENAME TO jobs_old")
                 c.executescript(SCHEMA)
                 c.execute("INSERT INTO jobs SELECT * FROM jobs_old")
@@ -158,6 +160,10 @@ class Store:
                           "REFERENCES projects(id)")
             if "reviewed_at" not in cols:  # transcript check ("Korrektur abgeschlossen")
                 c.execute("ALTER TABLE interviews ADD COLUMN reviewed_at TEXT")
+            scols = {r["name"] for r in c.execute("PRAGMA table_info(speaker_edits)")}
+            if "source" not in scols:  # speaker corrections from before "by reference"
+                c.execute("ALTER TABLE speaker_edits ADD COLUMN source TEXT NOT NULL "
+                          "DEFAULT 'manual'")
             pcols = {r["name"] for r in c.execute("PRAGMA table_info(projects)")}
             if "smoothing_tags" not in pcols:  # one tag per line, empty = defaults
                 c.execute("ALTER TABLE projects ADD COLUMN smoothing_tags TEXT NOT NULL "
@@ -353,8 +359,9 @@ class Store:
 
     def speaker_edits(self, interview_id: str) -> list[dict[str, Any]]:
         with self._conn() as c:
-            rows = c.execute("SELECT turn, word, speaker FROM speaker_edits WHERE interview_id = ? "
-                             "ORDER BY turn, word", (interview_id,)).fetchall()
+            rows = c.execute("SELECT turn, word, speaker, source FROM speaker_edits "
+                             "WHERE interview_id = ? ORDER BY turn, word",
+                             (interview_id,)).fetchall()
         return [dict(r) for r in rows]
 
     def set_speakers(self, interview_id: str, turn: int, words: dict[int, str | None]) -> None:
@@ -367,10 +374,24 @@ class Store:
                               "AND word = ?", (interview_id, turn, word))
                 else:
                     c.execute("INSERT INTO speaker_edits (interview_id, turn, word, speaker, "
-                              "updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(interview_id, "
-                              "turn, word) DO UPDATE SET speaker = excluded.speaker, "
+                              "source, updated_at) VALUES (?, ?, ?, ?, 'manual', ?) "
+                              "ON CONFLICT(interview_id, turn, word) DO UPDATE SET "
+                              "speaker = excluded.speaker, source = 'manual', "
                               "updated_at = excluded.updated_at",
                               (interview_id, turn, word, speaker, now))
+
+    def set_reference_speakers(self, interview_id: str, rows: list[dict[str, Any]]) -> None:
+        """Replace the speakers assigned by voice (``rows``: turn, word, speaker). Words you
+        corrected by hand keep your correction."""
+        now = _now()
+        with self._conn() as c:
+            c.execute("DELETE FROM speaker_edits WHERE interview_id = ? "
+                      "AND source = 'reference'", (interview_id,))
+            c.executemany(
+                "INSERT INTO speaker_edits (interview_id, turn, word, speaker, source, "
+                "updated_at) VALUES (?, ?, ?, ?, 'reference', ?) "
+                "ON CONFLICT(interview_id, turn, word) DO NOTHING",
+                [(interview_id, r["turn"], r["word"], r["speaker"], now) for r in rows])
 
     def reviewed(self, interview_id: str) -> bool:
         with self._conn() as c:

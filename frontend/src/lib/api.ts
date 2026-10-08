@@ -25,7 +25,7 @@ export interface ProjectSummary extends Project {
 
 export interface Job {
   id: number;
-  kind: "transcribe" | "analyze";
+  kind: "transcribe" | "analyze" | "speakers";
   interview_id: string;
   status: "queued" | "running" | "done" | "failed" | "cancelled";
   options: Partial<TranscriptionSettings> & { preset?: string };
@@ -237,8 +237,8 @@ export interface Word {
   g?: string;
   /** speaker, only when another speaker than the turn's says this word */
   sp?: string;
-  /** 1 when the speaker was corrected by hand */
-  so?: 1;
+  /** speaker corrected: 1 by hand, 2 assigned by voice (reference) */
+  so?: 1 | 2;
 }
 
 export interface Edit {

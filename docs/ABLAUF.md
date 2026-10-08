@@ -96,6 +96,14 @@ Sprecher wechselt, steht sein Name im Text. Ein Abschnitt zählt für den Sprech
 meisten seiner Wörter sagt; ein Satz ebenso. Bei „Änderungen anzeigen“ sind geänderte Wörter
 gestrichelt umrandet.
 
+**Sprecher nach Stimme:** Ist die Sprechertrennung schlecht, die erste Minute (oder mehr)
+wie oben richtigstellen und „Sprecher nach Stimme …“ wählen. Ein Hintergrundauftrag lernt aus
+diesem Anfang die Stimmen (Stimmabdruck je Satz mit dem Modell der Sprechertrennung) und gibt
+jeden späteren Satz der Stimme, der er deutlich ähnlicher klingt; sehr kurze Sätze behalten
+ihren Sprecher. Das Ergebnis erscheint als Sprecherkorrektur (bei „Änderungen anzeigen“
+gepunktet umrandet), deine eigenen Korrekturen bleiben immer vorrangig, und „Zuordnung nach
+Stimme zurücknehmen“ hebt alles davon wieder auf.
+
 Korrekturen und Sprecherkorrekturen machen die Analyse veraltet, wie Glättungen. Danach „Analyse aktualisieren“ wählen,
 damit die Fragenerkennung den korrigierten Text nutzt.
 
