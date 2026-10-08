@@ -104,8 +104,7 @@ class JobRunner:
             base += ["--models-dir", str(self.paths.models_dir)]
         if job["kind"] == "models":
             # The only job that uses the network: download + verify the pinned models.
-            return [*base, "setup-models", "--use-system-certs", "--allow-verified-mirror",
-                    "--progress-json"]
+            return [*base, "setup-models", "--allow-verified-mirror", "--progress-json"]
         guide = self.guide_file(iid)
         guide_args = ["--guide", str(guide)] if guide else []
         if job["kind"] == "transcribe":

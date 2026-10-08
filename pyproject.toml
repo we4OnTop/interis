@@ -18,8 +18,6 @@ dependencies = [
     "safetensors>=0.5.2",
     # Export
     "python-docx>=1.1",
-    # TLS through the Windows certificate store (--use-system-certs); already in uv.lock
-    "truststore>=0.10",
     "fastapi>=0.118",
     "uvicorn>=0.37",
     "starlette>=1.3.1",

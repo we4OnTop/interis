@@ -14,12 +14,11 @@
 .EXAMPLE
   .\scripts\install.ps1 -DataDir X:\interis-data
   .\scripts\install.ps1 -DataDir X:\interis-data -ModelsFrom E:\interis-models
-  .\scripts\install.ps1 -DataDir X:\interis-data -UseSystemCerts -AllowVerifiedMirror
+  .\scripts\install.ps1 -DataDir X:\interis-data -AllowVerifiedMirror
 #>
 param(
     [Parameter(Mandatory = $true)][string]$DataDir,
     [string]$ModelsFrom,
-    [switch]$UseSystemCerts,
     [switch]$AllowVerifiedMirror
 )
 
@@ -79,13 +78,13 @@ if ($ModelsFrom) {
 # 5. models (verifies copied ones, downloads missing ones)
 Step 'Models (verifying / downloading)'
 $args = @('run', 'interis', 'setup-models')
-if ($UseSystemCerts) { $args += '--use-system-certs' }
 if ($AllowVerifiedMirror) { $args += '--allow-verified-mirror' }
 & uv @args
 if ($LASTEXITCODE -ne 0) {
     Write-Host @'
 Model setup did not finish. Common causes:
-  * "CERTIFICATE_VERIFY_FAILED": an antivirus scans HTTPS -> add -UseSystemCerts
+  * "CERTIFICATE_VERIFY_FAILED": an antivirus scans HTTPS -> set $env:SSL_CERT_FILE to its
+    exported root certificate (PEM), or copy the models from another PC with -ModelsFrom
   * pyannote "gated model": set $env:HF_TOKEN (see README) or add -AllowVerifiedMirror
 '@ -ForegroundColor Yellow
     exit 1

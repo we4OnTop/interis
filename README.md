@@ -53,7 +53,10 @@ Voraussetzungen: [Git](https://git-scm.com), [uv](https://docs.astral.sh/uv/)
    - `-ModelsFrom E:\interis-models`: Modelle von einem USB-Stick übernehmen, statt sie
      herunterzuladen. Kopiert wird der Ordner `models` eines anderen PCs; geprüft wird per
      Prüfsumme.
-   - `-UseSystemCerts`: nötig, wenn ein Virenscanner HTTPS aufbricht (z. B. Kaspersky).
+   - Bricht ein Virenscanner HTTPS auf (z. B. Kaspersky, Fehler `CERTIFICATE_VERIFY_FAILED`):
+     dessen Stammzertifikat als PEM exportieren und vor dem Skript
+     `$env:SSL_CERT_FILE = "C:\pfad\zertifikat.pem"` setzen, oder die Modelle mit
+     `-ModelsFrom` von einem anderen PC übernehmen.
    - Sprechertrennungs-Modell (pyannote): bevorzugt bei Hugging Face die Bedingungen von
      [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
      akzeptieren, einen **Read**-Token erstellen und vor dem Skript `$env:HF_TOKEN = "hf_..."`

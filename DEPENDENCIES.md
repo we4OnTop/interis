@@ -126,17 +126,17 @@ the stdlib (expat with entity-expansion protection).
 
 On the development machine, **Kaspersky Anti-Virus** re-signs all HTTPS traffic with its own
 root certificate ("Kaspersky Anti-Virus Personal Root Certificate"). Python correctly refuses
-these connections. `interis setup-models --use-system-certs` verifies TLS against the Windows
-certificate store via [`truststore`](https://github.com/sethmlarson/truststore), which pip
-itself vendors. It is never `verify=False`. This is only relevant for the one-time model
-download. Interview data never goes over the network.
+these connections. Interis has no special switch for this (truststore was removed to keep the
+dependency set small). Options: export that root certificate as PEM and point `SSL_CERT_FILE`
+at it for the one-time `interis setup-models` run, or copy prepared models from another PC
+(`install.ps1 -ModelsFrom`). Verification is never turned off. Interview data never goes over
+the network.
 
 ## 6. Host tools
 
 | Tool | Purpose | Notes |
 |---|---|---|
 | Python 3.11, **uv-managed** (`python-preference = "only-managed"`) | runtime | Not the Microsoft Store Python. A Windows venv's `python.exe` is only a launcher, so the firewall rule must target the *base* interpreter. A dedicated uv-managed interpreter keeps that rule specific. |
-| **truststore** | OS certificate store for the setup download | Opt-in via `--use-system-certs`. Same library pip vendors. |
 | **uv** (Astral) | env + lockfile | `[tool.uv] exclude-newer = "7 days"` (dependency cooldown), `uv sync --locked`. |
 | Node.js LTS + npm | frontend build only | Not needed at runtime. |
 | **VeraCrypt** | encrypted data container | Open source, independently audited (Quarkslab 2016, Fraunhofer SIT for BSI 2020). |

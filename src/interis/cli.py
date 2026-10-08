@@ -49,12 +49,6 @@ def _progress_json():
 def cmd_setup_models(args: argparse.Namespace, paths: Paths) -> int:
     from interis.models import MODELS, ModelError, setup_model
 
-    if args.use_system_certs:
-        # Antivirus products that inspect HTTPS add their root certificate to the Windows
-        # store; this makes the download trust that store (verification stays on).
-        import truststore
-
-        truststore.inject_into_ssl()
     keys = args.only or list(MODELS)
     token = os.environ.get("HF_TOKEN") or None
     for i, key in enumerate(keys):
@@ -293,9 +287,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("setup-models", help="one-time download + verification of models "
                                             "(the only command that uses the network)")
     p.add_argument("--only", nargs="+", choices=list(MODELS), help="only these models")
-    p.add_argument("--use-system-certs", action="store_true",
-                   help="verify TLS against the Windows certificate store (needed behind "
-                        "TLS-intercepting antivirus/proxies)")
     p.add_argument("--allow-verified-mirror", action="store_true",
                    help="without HF_TOKEN: fetch gated models from their ungated mirror; "
                         "files are verified against the official repo's hashes")
