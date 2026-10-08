@@ -213,7 +213,8 @@ def test_upload_parts_and_start_transcription(client, data_dir):
     r = client.post("/api/interviews/I01/transcribe", headers=H,
                     json={"model": "whisper-large-v3-turbo"})
     job = store.job(r.json()["job"])
-    assert job["kind"] == "transcribe" and job["options"] == {"model": "whisper-large-v3-turbo"}
+    assert job["kind"] == "transcribe"
+    assert job["options"] == {"model": "whisper-large-v3-turbo", "room_mic": False}
     # no changes while the job is pending
     assert client.post("/api/interviews/I01/parts?ext=wav", headers=H,
                        content=b"x").status_code == 409
@@ -351,7 +352,9 @@ def test_job_command_uses_project_guide_and_hotwords(data_dir):
     assert cmd[cmd.index("--guide") + 1] == str(guide)
     assert cmd[cmd.index("--hotwords") + 1] == "Müller SAP"
     assert cmd[cmd.index("--model") + 1] == "whisper-large-v3-turbo"
-    assert "--progress-json" in cmd
+    assert "--progress-json" in cmd and "--room-mic" not in cmd
+    cmd = runner.command(store.job(store.add_job("transcribe", "I01", {"room_mic": True})))
+    assert "--room-mic" in cmd
 
 
 def test_old_database_gets_project_column(tmp_path):

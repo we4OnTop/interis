@@ -160,8 +160,9 @@ function InterviewCard({ iv }: { iv: InterviewRow }) {
 
   const start = async () => {
     const model = (j?.kind === "transcribe" && j.options.model) || "whisper-large-v3";
+    const room_mic = j?.kind === "transcribe" && j.options.room_mic === true;
     try {
-      await api("POST", `/api/interviews/${enc(iv.id)}/transcribe`, { model });
+      await api("POST", `/api/interviews/${enc(iv.id)}/transcribe`, { model, room_mic });
       notify(`${iv.id}: Transkription eingereiht`);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409 && iv.transcribed) {
@@ -172,7 +173,7 @@ function InterviewCard({ iv }: { iv: InterviewRow }) {
           confirm: "Neu transkribieren",
           destructive: true,
         });
-        if (ok) await run(() => api("POST", `/api/interviews/${enc(iv.id)}/transcribe`, { model, discard_markings: true }), `${iv.id}: Transkription eingereiht`);
+        if (ok) await run(() => api("POST", `/api/interviews/${enc(iv.id)}/transcribe`, { model, room_mic, discard_markings: true }), `${iv.id}: Transkription eingereiht`);
         return;
       }
       fail(e);

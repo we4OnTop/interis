@@ -243,7 +243,7 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
         asr_model=args.model,
         asr=AsrOptions(compute_type=args.compute_type, beam_size=args.beam_size,
                        hotwords=args.hotwords, initial_prompt=args.initial_prompt,
-                       threads=args.threads),
+                       threads=args.threads, room_mic=args.room_mic),
         align=not args.no_align,
         diarize=not args.no_diarize,
         num_speakers=args.speakers or None,
@@ -308,6 +308,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--speakers", type=int, default=2, help="number of speakers (0 = auto)")
     p.add_argument("--hotwords", help="glossary of names/terms to help spelling")
     p.add_argument("--initial-prompt", help="optional Whisper prompt (experimental)")
+    p.add_argument("--room-mic", action="store_true",
+                   help="one room microphone, one speaker much quieter: even out loudness "
+                        "and detect quiet speech (measure it with bench/wer.py)")
     p.add_argument("--threads", type=int, help="CPU threads (default: all)")
     p.add_argument("--no-align", action="store_true", help="skip word alignment")
     p.add_argument("--no-diarize", action="store_true", help="skip speaker diarization")

@@ -83,6 +83,7 @@ uv run interis transcribe "X:\interis-data\audio\interview01.m4a" --id I01
 | `--model whisper-large-v3-turbo` | schneller Entwurf; Standard ist `whisper-large-v3` (am genauesten) |
 | `--compute-type float32` | maximale Genauigkeit, langsamer (Standard `int8`) |
 | `--hotwords "Name1 Fachbegriff"` | Glossar für die richtige Schreibweise von Namen/Begriffen |
+| `--room-mic` | ein Mikrofon im Raum: gleicht leise/laute Stimmen an, erkennt leise Sprache besser |
 | `--speakers 2` | Anzahl der Sprecher (Standard 2; `0` = automatisch) |
 | `--no-diarize` / `--no-align` | Sprechertrennung / Wort-Alignment überspringen |
 
@@ -92,9 +93,29 @@ Ergebnis in `X:\interis-data\exports\I01\`:
   Sprechen kursiv
 - `I01.txt`: Klartext mit Zeitstempeln
 
+### Aufnahmen mit Raummikrofon
+
+Hall und Abstand kosten mehr Genauigkeit als jede Einstellung. In dieser Reihenfolge wirkt es:
+
+1. **Aufnahme:** Mikrofon oder Handy höchstens 1 m von beiden entfernt, zwischen euch, auf
+   einem weichen Untergrund (Tuch, Buch), nicht auf einem hallenden Tisch. Kleiner Raum mit
+   Teppich oder Vorhängen statt Besprechungsraum mit Glas. Wenn möglich zweites Handy direkt
+   bei der befragten Person als Reserve.
+2. **Glossar** (Projekt-Einstellungen): Namen und Fachbegriffe, die im Gespräch fallen
+   (z. B. `Miro Figma Wireframe Mockup Klickdummy Prototyp Anforderungserhebung`). Kurz
+   halten, nur Begriffe, keine Sätze.
+3. **„Ein Mikrofon im Raum“** beim Hinzufügen des Gesprächs (CLI: `--room-mic`).
+4. **Messen statt raten:** 3–5 Minuten selbst abtippen und die Varianten vergleichen, siehe
+   `bench/wer.py`. „fehlend“ hoch = leise Sprache verloren, „falsch“ hoch = undeutlich oder
+   unbekannte Begriffe.
+
+Schneller: `whisper-large-v3-turbo` braucht nur einen Bruchteil der Zeit, ist aber etwas
+ungenauer. Ob der Unterschied bei deinen Aufnahmen zählt, zeigt `bench/wer.py`.
+
 ## Interviewleitfaden
 
-Als Markdown-Datei, z. B. `X:\interis-data\leitfaden.md`:
+Als Markdown-Datei, z. B. `X:\interis-data\leitfaden.md`, oder als Typst-Datei mit
+`#frage(...)[...]` und `#impuls[...]`: in der Website laden oder einfügen, sie wird umgewandelt.
 
 ```markdown
 # Leitfaden Masterarbeit
@@ -102,6 +123,8 @@ Als Markdown-Datei, z. B. `X:\interis-data\leitfaden.md`:
 - F1: Erzählen Sie mir, wie Ihr Arbeitsalltag aussieht.
   ~ Wie sieht ein typischer Arbeitstag bei Ihnen aus?     (andere Formulierung)
   > Seit wann sind Sie in dieser Position?                 (geplante Nachfrage)
+  ! nur, wenn der Alltag noch nicht erzählt wurde          (Hinweis für dich)
+- F3: Wie lange sind Sie schon dabei? [optional]           ([optional]/[Nebenfrage]: darf entfallen)
 ## Künstliche Intelligenz
 - F2: Welche Rolle spielt künstliche Intelligenz in Ihrer Arbeit?
 - Wie gehen Sie mit vertraulichen Daten um?                (Code wird automatisch vergeben)

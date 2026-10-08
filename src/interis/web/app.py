@@ -184,6 +184,7 @@ class InterviewCreate(BaseModel):
 
 class TranscribeRequest(BaseModel):
     model: str = Field(default="whisper-large-v3", max_length=60)
+    room_mic: bool = False
     # Re-transcribing changes all word positions, so earlier markings would point to
     # the wrong words. They are removed – only after the user confirmed it.
     discard_markings: bool = False
@@ -679,7 +680,8 @@ def create_app(paths: Paths, login_token: str, port: int,
             if ((paths.exports / interview / f"{interview}.json").is_file()
                     and _has_work(interview) and not body.discard_markings):
                 raise HTTPException(409, "Neu transkribieren entfernt deine Markierungen")
-            job_id = store.add_job("transcribe", interview, {"model": body.model})
+            job_id = store.add_job("transcribe", interview,
+                                   {"model": body.model, "room_mic": body.room_mic})
         runner.notify()
         return {"job": job_id}
 

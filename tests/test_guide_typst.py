@@ -50,3 +50,43 @@ def test_a_missing_optional_question_is_skipped_not_missing():
     guide = parse_guide("- F1: Wie geht es?\n- F2: Und sonst? [Nebenfrage]")
     cells = interview_state(t, [], [], guide)["cells"]
     assert (cells["F1"]["status"], cells["F2"]["status"]) == ("missing", "skipped")
+
+
+def test_room_mic_levelling_raises_the_quiet_speaker_but_not_the_pauses():
+    import numpy as np
+
+    from interis.pipeline.asr import SAMPLE_RATE, AsrOptions, level
+
+    rng = np.random.default_rng(0)
+    t = np.arange(4 * SAMPLE_RATE) / SAMPLE_RATE
+    loud = 0.3 * np.sin(2 * np.pi * 200 * t)
+    quiet = 0.01 * np.sin(2 * np.pi * 200 * t)
+    pause = 0.0005 * rng.standard_normal(4 * SAMPLE_RATE)
+    x = np.concatenate([loud, pause, quiet]).astype(np.float32)
+    y = level(x)
+
+    def rms(a):
+        return float(np.sqrt(np.mean(a ** 2)))
+
+    s = 4 * SAMPLE_RATE
+    mid = slice(SAMPLE_RATE, 3 * SAMPLE_RATE)  # away from the transitions
+    before = rms(x[2 * s:][mid]) / rms(x[:s][mid])
+    after = rms(y[2 * s:][mid]) / rms(y[:s][mid])
+    assert after > 5 * before  # the quiet speaker is much closer to the loud one
+    assert rms(y[s:2 * s][mid]) < rms(y[2 * s:][mid]) / 3  # the pause stays below speech
+    assert y.dtype == np.float32 and np.abs(y).max() <= 1.0
+    assert "room_mic" not in AsrOptions().as_params()  # old cache keys stay valid
+    assert AsrOptions(room_mic=True).as_params()["room_mic"] is True
+
+
+def test_word_error_rate_counts_wrong_missing_and_extra_words():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "wer", Path(__file__).parents[1] / "bench" / "wer.py")
+    wer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(wer)
+    ref = wer.words("Wir nutzen Miro, und Figma!")
+    assert wer.errors(ref, wer.words("wir nutzen miro und figma")) == (0, 0, 0)
+    assert wer.errors(ref, wer.words("wir nutzen mirror figma ja")) == (1, 1, 1)

@@ -28,7 +28,7 @@ export interface Job {
   kind: "transcribe" | "analyze";
   interview_id: string;
   status: "queued" | "running" | "done" | "failed" | "cancelled";
-  options: { model?: string };
+  options: { model?: string; room_mic?: boolean };
   stage: string;
   progress: number;
   message: string;

@@ -116,6 +116,8 @@ class JobRunner:
                    "--model", job["options"].get("model", "whisper-large-v3"), *guide_args]
             if hotwords := self.hotwords(iid):
                 cmd += ["--hotwords", hotwords]
+            if job["options"].get("room_mic") is True:
+                cmd.append("--room-mic")
             return cmd
         transcript = self.paths.exports / iid / f"{iid}.json"
         if not transcript.is_file():

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowDownIcon, ArrowUpIcon, FileAudioIcon, PlusIcon, UploadIcon, XIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -33,6 +34,7 @@ export function AddInterviewDialog({ open, onOpenChange }: { open: boolean; onOp
   const [id, setId] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [model, setModel] = useState("whisper-large-v3");
+  const [roomMic, setRoomMic] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [current, setCurrent] = useState(0);
   const input = useRef<HTMLInputElement>(null);
@@ -63,7 +65,7 @@ export function AddInterviewDialog({ open, onOpenChange }: { open: boolean; onOp
         setProgress(x);
         setCurrent(i);
       });
-      await api("POST", `/api/interviews/${enc(id)}/transcribe`, { model });
+      await api("POST", `/api/interviews/${enc(id)}/transcribe`, { model, room_mic: roomMic });
       notify(`${id}: ${files.length > 1 ? `${files.length} Teile hochgeladen` : "hochgeladen"} – Transkription eingereiht`);
       onOpenChange(false);
     } catch (e) {
@@ -171,6 +173,16 @@ export function AddInterviewDialog({ open, onOpenChange }: { open: boolean; onOp
               Dauer: etwa 35–40 s pro Audiominute auf dem Entwicklungs-PC, auf dem Laptop etwa doppelt so lang. Die Transkription läuft im
               Hintergrund weiter, auch wenn du das Fenster schließt.
             </p>
+            <label className="flex items-start gap-2 text-sm">
+              <Checkbox className="mt-0.5" checked={roomMic} onCheckedChange={(c) => setRoomMic(c === true)} disabled={busy} />
+              <span>
+                Ein Mikrofon im Raum
+                <span className="text-muted-foreground block text-xs">
+                  Gleicht leise und laute Stimmen an und erkennt leise Sprache besser. Gegen Hall und Störgeräusche hilft nur ein näher
+                  platziertes Mikrofon.
+                </span>
+              </span>
+            </label>
           </div>
 
           {busy && (

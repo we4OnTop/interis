@@ -38,7 +38,9 @@ Funktion `interview_row`). Die Seite zeigt nur an, was der Server berechnet.
 ## 1. Leitfaden festlegen
 
 **Was tun:** Unter „Leitfaden & Gespräche“ im Reiter „Leitfaden“ den Leitfaden eingeben
-oder als Datei laden (.docx, .md, .txt). Jede Frage bekommt einen Code (F1, F2 …). Eine Frage
+oder als Datei laden (.typ, .docx, .md, .txt); ein Typst-Leitfaden kann auch direkt
+eingefügt werden. Fragen mit `[optional]` oder `[Nebenfrage]` dürfen entfallen: Fehlen sie,
+heißt das „entfallen – optional“ statt „fehlt – begründen“. Jede Frage bekommt einen Code (F1, F2 …). Eine Frage
 ohne Code bekommt den nächsten Code über dem höchsten vorhandenen; beim Speichern schreibt
 Interis diesen Code in den Leitfaden, er ändert sich danach nicht mehr. Bei einer
 .docx-Datei gelten nur Zeilen mit „- “ als Fragen; die Oberfläche bittet dann um eine Prüfung.
