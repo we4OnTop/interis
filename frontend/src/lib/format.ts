@@ -45,6 +45,7 @@ export const STATUS_LABEL: Record<CellStatus, string> = {
   answered_elsewhere: "anderswo beantwortet",
   omitted: "weggelassen – schon beantwortet",
   explained: "nicht gestellt – begründet",
+  skipped: "entfallen – optional",
   missing: "fehlt – begründen",
 };
 

@@ -3,7 +3,7 @@
 
 export type Role = "interviewer" | "interviewee" | "unknown";
 export type Match = "main" | "probe" | "followup" | null;
-export type CellStatus = "asked" | "answered_elsewhere" | "omitted" | "explained" | "missing";
+export type CellStatus = "asked" | "answered_elsewhere" | "omitted" | "explained" | "skipped" | "missing";
 export type DecisionReason = "not_asked" | "not_relevant" | "other";
 export type EditKind = "correction" | "smoothing";
 export type LinkType = "anticipated" | "later" | "unasked";
@@ -64,6 +64,10 @@ export interface GuideQuestion {
   section: string | null;
   variants: string[];
   probes: string[];
+  tags: string[];
+  hint: string;
+  /** optional, Nebenfrage or Impuls: may be left out without a reason */
+  droppable: boolean;
 }
 
 export interface Guide {

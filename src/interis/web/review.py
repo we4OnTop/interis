@@ -129,6 +129,7 @@ def interview_state(t: Transcript, marks: list[dict[str, Any]],
     linked = {(lk["guide_code"], lk["turn"], lk["first"], lk["last"]) for lk in links}
     cells: dict[str, dict[str, Any]] = {}
     codes = [g.code for g in guide.questions] if guide else []
+    droppable = {g.code: g.droppable for g in guide.questions} if guide else {}
     for code in codes:
         asked = [q for q in questions if q.guide_code == code and q.match == "main"]
         exchanges = []
@@ -168,6 +169,8 @@ def interview_state(t: Transcript, marks: list[dict[str, Any]],
             status = "answered_elsewhere"
         elif code in decided:
             status = "explained"
+        elif droppable[code]:
+            status = "skipped"  # optional / Nebenfrage: leaving it out needs no reason
         else:
             status = "missing"
         cells[code] = {"status": status, "exchanges": exchanges, "links": confirmed,

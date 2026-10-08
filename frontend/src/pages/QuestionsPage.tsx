@@ -3,7 +3,7 @@ import { ChevronLeftIcon, ChevronRightIcon, FileTextIcon, LayoutGridIcon, Loader
 
 import { InterviewFilter } from "@/components/InterviewFilter";
 import { LoadError } from "@/components/LoadError";
-import { CellContent, PlayButton, StatusBadge, StatusDot, Time } from "@/components/review";
+import { CellContent, PlayButton, QuestionMeta, StatusBadge, StatusDot, Time } from "@/components/review";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -152,7 +152,7 @@ function QuestionNav({ data, ids, code, pid }: { data: Compare; ids: string[]; c
 function Legend() {
   return (
     <div className="text-muted-foreground flex flex-wrap gap-4 text-xs">
-      {(["asked", "answered_elsewhere", "omitted", "explained", "missing"] as const).map((s) => (
+      {(["asked", "answered_elsewhere", "omitted", "explained", "skipped", "missing"] as const).map((s) => (
         <span key={s} className="flex items-center gap-1.5">
           <StatusDot status={s} />
           {STATUS_LABEL[s]}
@@ -267,6 +267,7 @@ function QuestionDetail({
           <h1 className="text-xl leading-snug font-semibold">{q.text}</h1>
           {q.variants.length > 0 && <p className="text-muted-foreground mt-1 text-sm">auch: {q.variants.join(" · ")}</p>}
           {q.probes.length > 0 && <p className="text-muted-foreground text-sm">Nachfragen: {q.probes.join(" · ")}</p>}
+          <QuestionMeta q={q} />
         </div>
         <div className="flex shrink-0 gap-1">
           <Button variant="outline" size="icon-sm" disabled={!prev} onClick={() => prev && navigate(href.questions(pid, prev))} title="vorige Frage (←)">

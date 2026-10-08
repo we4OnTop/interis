@@ -37,7 +37,7 @@ STEPS: list[dict[str, str]] = [
      "text": "Auswertungstabelle als Word oder CSV (Excel) herunterladen."},
 ]
 
-CELL_STATUSES = ("asked", "answered_elsewhere", "omitted", "explained", "missing")
+CELL_STATUSES = ("asked", "answered_elsewhere", "omitted", "explained", "skipped", "missing")
 
 
 def interview_row(i: dict[str, Any], guide_codes: list[str]) -> dict[str, Any]:

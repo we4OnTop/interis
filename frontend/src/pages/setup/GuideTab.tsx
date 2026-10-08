@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { FileUpIcon, ListPlusIcon, SaveIcon } from "lucide-react";
 
+import { QuestionMeta } from "@/components/review";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -49,9 +50,17 @@ export function GuideTab() {
         .join("\n"),
     );
 
+  const fromTypst = async (typst: string) => {
+    const r = await api<{ text: string }>("POST", "/api/guide/import-typst", { text: typst });
+    setText(r.text);
+    notify("Typst-Leitfaden übernommen – bitte prüfen und speichern.");
+  };
+
   const load = async (f: File) => {
     try {
-      if (f.name.toLowerCase().endsWith(".docx")) {
+      if (f.name.toLowerCase().endsWith(".typ")) {
+        await fromTypst(await f.text());
+      } else if (f.name.toLowerCase().endsWith(".docx")) {
         const r = await postFile<{ text: string }>("/api/guide/import-docx", f);
         setText(r.text);
         notify("Word-Datei übernommen – bitte prüfen: nur Zeilen mit „- “ gelten als Fragen.");
@@ -83,15 +92,16 @@ export function GuideTab() {
         <CardHeader>
           <CardTitle>Leitfaden</CardTitle>
           <CardDescription>
-            Jede Frage beginnt mit „- “. Kürzel wie „F1:“ sind optional. „~“ = andere Formulierung, „&gt;“ = geplante Nachfrage, „##“ =
-            Abschnitt.
+            Jede Frage beginnt mit „- “. Kürzel wie „F1:“ sind optional. „~“ = andere Formulierung, „&gt;“ = geplante Nachfrage, „!“ =
+            Hinweis für dich, „##“ = Abschnitt. „[optional]“ oder „[Nebenfrage]“ am Zeilenende: darf entfallen. Ein Typst-Leitfaden
+            (#frage, #impuls) kann direkt eingefügt oder geladen werden.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" size="sm" onClick={() => file.current?.click()}>
               <FileUpIcon />
-              Datei laden (.docx, .md, .txt)
+              Datei laden (.typ, .docx, .md, .txt)
             </Button>
             <Button variant="outline" size="sm" onClick={linesToQuestions} title="Macht aus jeder einfachen Textzeile eine Frage">
               <ListPlusIcon />
@@ -100,7 +110,7 @@ export function GuideTab() {
             <input
               ref={file}
               type="file"
-              accept=".md,.txt,.docx"
+              accept=".typ,.md,.txt,.docx"
               hidden
               onChange={(e) => {
                 const f = e.target.files?.[0];
@@ -112,6 +122,14 @@ export function GuideTab() {
           <Textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
+            onPaste={(e) => {
+              // a whole Typst guide pasted in: convert it instead of inserting the source
+              const pasted = e.clipboardData.getData("text");
+              if (/#frage[([]/.test(pasted)) {
+                e.preventDefault();
+                fromTypst(pasted).catch(fail);
+              }
+            }}
             spellCheck
             className="field-sizing-fixed h-[28rem] resize-y font-mono text-[13px] leading-relaxed"
           />
@@ -131,7 +149,11 @@ export function GuideTab() {
         <CardHeader>
           <CardTitle>Vorschau</CardTitle>
           <CardDescription>
-            {preview.guide ? `${preview.guide.questions.length} Fragen erkannt` : preview.error ? "Fehler im Leitfaden" : "…"}
+            {preview.guide
+              ? `${preview.guide.questions.length} Fragen erkannt, davon ${preview.guide.questions.filter((q) => !q.droppable).length} Pflichtfragen`
+              : preview.error
+                ? "Fehler im Leitfaden"
+                : "…"}
           </CardDescription>
         </CardHeader>
         <CardContent className="max-h-[34rem] space-y-2 overflow-auto">
@@ -150,6 +172,7 @@ export function GuideTab() {
                     <p>{q.text}</p>
                     {q.variants.length > 0 && <p className="text-muted-foreground text-xs">auch: {q.variants.join(" · ")}</p>}
                     {q.probes.length > 0 && <p className="text-muted-foreground text-xs">Nachfragen: {q.probes.join(" · ")}</p>}
+                    <QuestionMeta q={q} />
                   </div>
                 </div>
               </div>

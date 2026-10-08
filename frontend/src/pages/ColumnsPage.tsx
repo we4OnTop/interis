@@ -3,7 +3,7 @@ import { LoaderIcon, PencilIcon } from "lucide-react";
 
 import { InterviewFilter } from "@/components/InterviewFilter";
 import { LoadError } from "@/components/LoadError";
-import { CellContent, PlayButton, StatusBadge, Time } from "@/components/review";
+import { CellContent, PlayButton, QuestionMeta, StatusBadge, Time } from "@/components/review";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { api, type AskedQuestion } from "@/lib/api";
@@ -149,6 +149,7 @@ export function ColumnsPage() {
                       {q.text}
                     </a>
                     {q.variants.length > 0 && <p className="text-muted-foreground mt-1 text-xs">auch: {q.variants.join(" · ")}</p>}
+                    <QuestionMeta q={q} />
                   </div>
                   {ids.map((id) => {
                     const cell = data.cells[id][q.code];

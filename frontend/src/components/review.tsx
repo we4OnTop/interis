@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { api, type Cell, type CellStatus, type DialogueTurn, type Link, type Suggestion } from "@/lib/api";
+import { api, type Cell, type CellStatus, type DialogueTurn, type GuideQuestion, type Link, type Suggestion } from "@/lib/api";
 import { useFeedback } from "@/lib/feedback";
 import { LINK_LABEL, REASON_LABEL, STATUS_LABEL, stamp, tagText } from "@/lib/format";
 import { usePlayer, usePlayerState } from "@/lib/player";
@@ -56,11 +56,27 @@ const STATUS_STYLE: Record<CellStatus, string> = {
   answered_elsewhere: "bg-linked-soft text-linked",
   omitted: "bg-linked-soft text-linked",
   explained: "bg-muted text-muted-foreground",
+  skipped: "bg-muted text-muted-foreground",
   missing: "bg-suggest-soft text-suggest",
 };
 
 export function StatusBadge({ status }: { status: CellStatus }) {
   return <Badge className={cn("border-transparent", STATUS_STYLE[status])}>{STATUS_LABEL[status]}</Badge>;
+}
+
+/** Tags ("optional", "Nebenfrage") and the interviewer note of a guide question. */
+export function QuestionMeta({ q }: { q: GuideQuestion }) {
+  if (!q.tags?.length && !q.hint) return null;
+  return (
+    <p className="text-muted-foreground mt-1 flex flex-wrap items-center gap-1 text-xs">
+      {q.tags?.map((t) => (
+        <Badge key={t} variant="outline" className="px-1.5 py-0 text-[11px]">
+          {t}
+        </Badge>
+      ))}
+      {q.hint && <span className="italic">{q.hint}</span>}
+    </p>
+  );
 }
 
 /** Small coloured square for the question × interview overview. */
@@ -70,6 +86,7 @@ export function StatusDot({ status, className }: { status: CellStatus; className
     answered_elsewhere: "bg-linked",
     omitted: "bg-linked ring-2 ring-linked/30",
     explained: "bg-muted-foreground/50",
+    skipped: "bg-muted-foreground/25",
     missing: "bg-transparent border border-dashed border-muted-foreground/50",
   };
   return <span className={cn("inline-block size-2.5 shrink-0 rounded-[3px]", style[status], className)} />;

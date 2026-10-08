@@ -36,11 +36,11 @@ from pydantic import AfterValidator, BaseModel, Field
 from interis.analysis.guide import (
     Guide,
     GuideError,
-    GuideQuestion,
     docx_to_guide_text,
     label_guide,
     load_guide,
     parse_guide,
+    typst_to_guide_text,
 )
 from interis.config import Paths
 from interis.models import ASR_MODELS
@@ -197,10 +197,6 @@ class GuideText(BaseModel):
     text: str = Field(max_length=MAX_GUIDE_CHARS)
 
 
-def _guide_from_dict(d: dict[str, Any]) -> Guide:
-    return Guide(d.get("title"), [GuideQuestion(**q) for q in d["questions"]])
-
-
 class _Data:
     """Transcripts and guides are re-read only when their file changes."""
 
@@ -273,7 +269,7 @@ class _Data:
                 return path.read_text(encoding="utf-8-sig")
         for t in self.transcripts(ids).values():
             if t.analysis.get("guide"):
-                return _guide_from_dict(t.analysis["guide"]).to_markdown()
+                return Guide.from_dict(t.analysis["guide"]).to_markdown()
         return None
 
 
@@ -578,6 +574,13 @@ def create_app(paths: Paths, login_token: str, port: int,
             return {"guide": parse_guide(body.text).to_dict(), "error": None}
         except GuideError as e:
             return {"guide": None, "error": str(e)}
+
+    @app.post("/api/guide/import-typst")
+    def import_typst(body: GuideText) -> dict[str, str]:
+        try:
+            return {"text": typst_to_guide_text(body.text)}
+        except GuideError as e:
+            raise HTTPException(422, f"Typst-Leitfaden: {e}") from e
 
     @app.post("/api/guide/import-docx")
     async def import_docx(request: Request) -> dict[str, str]:
