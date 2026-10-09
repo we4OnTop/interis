@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDownIcon, ChevronUpIcon, LoaderIcon, PauseIcon, PlayIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronUpIcon, LoaderIcon, MoveVerticalIcon, PauseIcon, PlayIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { api, enc, type InterviewDetail } from "@/lib/api";
 import { useFeedback } from "@/lib/feedback";
-import { type Draft } from "@/components/InsertEditor";
+import { fmtTime, parseTime, type Draft } from "@/components/InsertEditor";
 import { clock } from "@/lib/format";
 import { usePlayer, usePlayerState } from "@/lib/player";
 import { cn } from "@/lib/utils";
@@ -142,6 +142,93 @@ function splitAt(words: W[], t: number): number {
   return Math.min(Math.max(k, 1), words.length - 1);
 }
 
+/** A time you can type exactly: the menu that opens on a right click on an edge. */
+interface Precise {
+  x: number;
+  y: number;
+  title: string;
+  fields: { key: string; label: string; value: number }[];
+  /** what the values will do, shown while typing (null: not valid) */
+  info: (v: Record<string, number>) => string | null;
+  apply: (v: Record<string, number>) => void | Promise<void>;
+  listen: (v: Record<string, number>) => void;
+}
+
+function PreciseMenu({ menu, onClose }: { menu: Precise; onClose: () => void }) {
+  const [texts, setTexts] = useState(() => Object.fromEntries(menu.fields.map((f) => [f.key, fmtTime(f.value)])));
+  const values = Object.fromEntries(menu.fields.map((f) => [f.key, parseTime(texts[f.key])])) as Record<string, number | null>;
+  const ok = Object.values(values).every((v) => v !== null);
+  const info = ok ? menu.info(values as Record<string, number>) : null;
+  const first = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    first.current?.focus();
+    first.current?.select();
+    const away = (e: MouseEvent) => !(e.target as HTMLElement).closest("[data-precise]") && onClose();
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("mousedown", away);
+    window.addEventListener("keydown", esc);
+    return () => {
+      window.removeEventListener("mousedown", away);
+      window.removeEventListener("keydown", esc);
+    };
+  }, [onClose]);
+  const go = async () => {
+    if (!ok || info === null) return;
+    await menu.apply(values as Record<string, number>);
+    onClose();
+  };
+  return (
+    <div
+      data-precise
+      className="bg-popover text-popover-foreground fixed z-50 grid w-64 gap-2 rounded-md border p-3 text-xs shadow-lg"
+      style={{ left: Math.min(menu.x, window.innerWidth - 270), top: Math.min(menu.y, window.innerHeight - 220) }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      <p className="font-medium">{menu.title}</p>
+      {menu.fields.map((f, i) => (
+        <label key={f.key} className="grid gap-1">
+          <span className="text-muted-foreground">{f.label} (min:s.zehntel, z. B. 3:07.4)</span>
+          <input
+            ref={i === 0 ? first : undefined}
+            className="bg-background h-8 w-full rounded-md border px-2 font-mono text-sm"
+            value={texts[f.key]}
+            aria-invalid={values[f.key] === null}
+            onChange={(e) => setTexts({ ...texts, [f.key]: e.target.value })}
+            onKeyDown={(e) => e.key === "Enter" && void go()}
+          />
+        </label>
+      ))}
+      <p className={cn("min-h-4", info === null ? "text-destructive" : "text-muted-foreground")}>{ok ? (info ?? "Dieser Wert ist nicht möglich.") : "Zeit z. B. 3:07.4 oder 187,4"}</p>
+      <div className="flex gap-1">
+        <Button size="xs" disabled={!ok || info === null} onClick={() => void go()}>
+          Übernehmen
+        </Button>
+        <Button size="xs" variant="outline" disabled={!ok || info === null} onClick={() => menu.listen(values as Record<string, number>)}>
+          <PlayIcon />
+          Hörprobe
+        </Button>
+        <Button size="xs" variant="ghost" onClick={onClose}>
+          Abbrechen
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+interface FreeDrag {
+  key: string; // "draft" or "ins:<id>"
+  part: "start" | "end" | "move";
+  t0: number;
+  start0: number;
+  end0: number;
+  start: number;
+  end: number;
+  moved: boolean;
+}
+
+const MIN_LEN = 0.3;
+const round1 = (t: number) => Math.round(t * 10) / 10;
+
 export function TimeRail({
   d,
   onChanged,
@@ -167,28 +254,39 @@ export function TimeRail({
   const [peaks, setPeaks] = useState<Peaks | "missing" | "running" | null>(null);
   const [anchor, setAnchor] = useState<{ ti: number; wi: number } | null>(null);
   const [follow, setFollow] = useState(true);
+  const [edit, setEdit] = useState(false); // resize mode: nothing is played, edges and boxes can be moved
   const [drag, setDrag] = useState<{ t: number; moved: number } | null>(null);
+  const [ghost, setGhost] = useState<{ key: string; start: number; end: number } | null>(null);
+  const [menu, setMenu] = useState<Precise | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
+  const head = useRef<HTMLDivElement>(null);
+  const headLabel = useRef<HTMLSpanElement>(null);
   const [viewH, setViewH] = useState(600);
   const hovering = useRef(false);
-  const dragging = useRef<{ x: number; y: number; k0: number; words: W[]; side: "top" | "bottom"; k: number } | null>(null);
+  const dragging = useRef<{ k0: number; words: W[]; k: number } | null>(null);
+  const freeDrag = useRef<FreeDrag | null>(null);
+  const suppressClick = useRef(false);
 
   const blocks = useMemo(() => buildBlocks(d), [d]);
-  const draftEdge = useRef<"start" | "end" | null>(null);
-  const draftLane = draft && d.speakers.find((x) => x.label === draft.speaker)?.role === "interviewer" ? 0 : 1;
   const duration = useMemo(() => d.parts.reduce((m, p) => Math.max(m, p.offset_s + p.duration_s), 0) || (blocks.at(-1)?.end ?? 0), [d.parts, blocks]);
   const height = Math.ceil((duration + 4) * pps);
   const playing = ps.id === d.id;
+  const draftLane = draft && d.speakers.find((x) => x.label === draft.speaker)?.role === "interviewer" ? 0 : 1;
+  useEffect(() => setGhost(null), [d]); // the saved values arrive with the reloaded transcript
+
+  /** a block's times, with the box you are dragging right now */
+  const span = (b: Block) => (b.ins !== undefined && ghost?.key === `ins:${b.ins}` ? { start: ghost.start, end: ghost.end } : { start: b.start, end: b.end });
 
   const selIndex = anchor ? blocks.findIndex((b) => b.words.some((w) => w.ti === anchor.ti && w.wi === anchor.wi)) : -1;
   const sel = selIndex >= 0 ? blocks[selIndex] : null;
   const above = selIndex > 0 ? blocks[selIndex - 1] : null;
   const below = selIndex >= 0 && selIndex < blocks.length - 1 ? blocks[selIndex + 1] : null;
   // the border between two recorded blocks moves by giving words to the other speaker; a paragraph
-  // you typed in has its own times (edit it)
-  const canMoveTop = !!(sel && above && sel.ins === undefined && above.ins === undefined);
-  const canMoveBottom = !!(sel && below && sel.ins === undefined && below.ins === undefined);
+  // you typed in has its own times
+  const movable = (a: Block | null, b: Block | null) => !!(a && b && a.ins === undefined && b.ins === undefined);
+  const canMoveTop = !!(sel && movable(above, sel));
+  const canMoveBottom = !!(sel && movable(sel, below));
 
   // ---- waveform: made once per recording by a background job, then loaded
   const loadPeaks = useCallback(async () => {
@@ -287,21 +385,40 @@ export function TimeRail({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draftKey]);
 
-  // ---- the track follows the playhead, and follows the text when it is scrolled
+  // ---- the playhead reads the audio's own clock every frame (the state updates only a few times a
+  // second), and the track follows it
   useEffect(() => {
-    if (!playing || !ps.playing || !follow || dragging.current || hovering.current) return;
-    const sc = scroller.current;
-    if (!sc) return;
-    const y = ps.time * pps;
-    if (y < sc.scrollTop + viewH * 0.1 || y > sc.scrollTop + viewH * 0.7) scrollTo(ps.time);
-  }, [ps.time, ps.playing, playing, follow, pps, viewH, scrollTo]);
+    const line = head.current;
+    if (!line) return;
+    if (!playing) {
+      line.style.display = "none";
+      return;
+    }
+    let raf = 0;
+    const tick = () => {
+      const t = player.now();
+      if (t !== null) {
+        line.style.display = "block";
+        line.style.top = `${t * pps}px`;
+        if (headLabel.current) headLabel.current.textContent = fmtTime(t);
+        const sc = scroller.current;
+        if (sc && follow && ps.playing && !dragging.current && !freeDrag.current && !hovering.current) {
+          const y = t * pps;
+          if (y < sc.scrollTop + viewH * 0.1 || y > sc.scrollTop + viewH * 0.7) scrollTo(t);
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, ps.playing, follow, pps, viewH, player, scrollTo]);
 
   useEffect(() => {
     let timer = 0;
     const on = () => {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
-        if (hovering.current || dragging.current || (playing && ps.playing)) return;
+        if (hovering.current || dragging.current || freeDrag.current || (playing && ps.playing)) return;
         const rows = document.querySelectorAll<HTMLElement>('[id^="t-"]');
         for (const el of rows) {
           if (el.getBoundingClientRect().bottom > 140) {
@@ -319,7 +436,7 @@ export function TimeRail({
     };
   }, [d.turns, scrollTo, playing, ps.playing]);
 
-  // ---- moving the border between two blocks
+  // ---- moving the border between two recorded blocks: words change speaker
   const commit = useCallback(
     async (upper: Block, lower: Block, k: number) => {
       const all = [...upper.words, ...lower.words];
@@ -351,26 +468,26 @@ export function TimeRail({
     const sc = scroller.current!;
     return (clientY - sc.getBoundingClientRect().top + sc.scrollTop) / pps;
   };
+  const autoScroll = (clientY: number) => {
+    const sc = scroller.current!;
+    const r = sc.getBoundingClientRect();
+    if (clientY < r.top + 24) sc.scrollTop -= 10;
+    else if (clientY > r.bottom - 24) sc.scrollTop += 10;
+  };
 
-  const startDrag = (e: React.PointerEvent, side: "top" | "bottom") => {
-    if (!sel) return;
-    const upper = side === "top" ? above : sel;
-    const lower = side === "top" ? sel : below;
-    if (!upper || !lower) return;
+  const startBorder = (e: React.PointerEvent, upper: Block, lower: Block) => {
     e.preventDefault();
+    e.stopPropagation();
     e.currentTarget.setPointerCapture(e.pointerId);
     const words = [...upper.words, ...lower.words];
-    dragging.current = { x: e.clientX, y: e.clientY, k0: upper.words.length, words, side, k: upper.words.length };
+    dragging.current = { k0: upper.words.length, words, k: upper.words.length };
     setDrag({ t: (upper.end + lower.start) / 2, moved: 0 });
   };
 
-  const moveDrag = (e: React.PointerEvent) => {
+  const moveBorder = (e: React.PointerEvent) => {
     const g = dragging.current;
     if (!g) return;
-    const sc = scroller.current!;
-    const r = sc.getBoundingClientRect();
-    if (e.clientY < r.top + 24) sc.scrollTop -= 10;
-    else if (e.clientY > r.bottom - 24) sc.scrollTop += 10;
+    autoScroll(e.clientY);
     const t = timeAt(e.clientY);
     const k = splitAt(g.words, t);
     if (k !== g.k) {
@@ -381,19 +498,16 @@ export function TimeRail({
     setDrag({ t, moved: Math.abs(k - g.k0) });
   };
 
-  const endDrag = (upper: Block | null, lower: Block | null) => {
+  const endBorder = (upper: Block, lower: Block) => {
     const g = dragging.current;
     dragging.current = null;
     setDrag(null);
     if (!g) return;
     markMoving(g.words, false);
     // keep the selection on a word that does not change hands
-    if (upper && lower) setAnchor(g.side === "top" ? { ti: lower.words.at(-1)!.ti, wi: lower.words.at(-1)!.wi } : { ti: upper.words[0].ti, wi: upper.words[0].wi });
-    if (upper && lower && g.k !== g.k0) {
-      void commit(upper, lower, g.k);
-      const after = g.words[g.k]; // first word of the lower block now
-      if (after) play(after.s - LISTEN_S, after.s + LISTEN_S);
-    }
+    if (sel === upper) setAnchor({ ti: upper.words[0].ti, wi: upper.words[0].wi });
+    else if (sel === lower) setAnchor({ ti: lower.words.at(-1)!.ti, wi: lower.words.at(-1)!.wi });
+    if (g.k !== g.k0) void commit(upper, lower, g.k);
   };
 
   const nudge = async (side: "top" | "bottom", words: number) => {
@@ -406,34 +520,124 @@ export function TimeRail({
       notify("Weiter geht es nicht: jeder Block behält mindestens ein Wort");
       return;
     }
-    // keep the selection on a word that does not change hands
     setAnchor(side === "top" ? { ti: lower.words.at(-1)!.ti, wi: lower.words.at(-1)!.wi } : { ti: upper.words[0].ti, wi: upper.words[0].wi });
     await commit(upper, lower, k);
-    const at = all[k].s;
-    play(at - LISTEN_S, at + LISTEN_S);
+    if (!edit) play(all[k].s - LISTEN_S, all[k].s + LISTEN_S);
   };
 
-  const moveDraftEdge = (e: React.PointerEvent) => {
-    const edge = draftEdge.current;
-    if (!edge || !draft) return;
-    const t = Math.round(Math.max(0, timeAt(e.clientY)) * 10) / 10;
-    if (edge === "start") onDraft({ start: Math.min(t, draft.end - 0.3) });
-    else onDraft({ end: Math.max(t, draft.start + 0.3) });
+  // ---- paragraphs you typed in (saved or being typed): move the box, drag an edge
+  const saveInsert = useCallback(
+    async (id: number, start: number, end: number) => {
+      try {
+        await api("PUT", `/api/interviews/${enc(d.id)}/inserts/${id}`, { start, end });
+        onChanged();
+      } catch (e) {
+        fail(e);
+        setGhost(null);
+      }
+    },
+    [d.id, onChanged, fail],
+  );
+
+  const startFree = (e: React.PointerEvent, key: string, part: FreeDrag["part"], start: number, end: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    freeDrag.current = { key, part, t0: timeAt(e.clientY), start0: start, end0: end, start, end, moved: false };
   };
-  const endDraftEdge = () => {
-    const edge = draftEdge.current;
-    draftEdge.current = null;
-    if (edge && draft) play((edge === "start" ? draft.start : draft.end) - LISTEN_S, (edge === "start" ? draft.start : draft.end) + LISTEN_S);
+
+  const moveFree = (e: React.PointerEvent) => {
+    const g = freeDrag.current;
+    if (!g) return;
+    autoScroll(e.clientY);
+    const dt = timeAt(e.clientY) - g.t0;
+    let start = g.start0;
+    let end = g.end0;
+    if (g.part === "start") start = Math.min(Math.max(0, round1(g.start0 + dt)), g.end0 - MIN_LEN);
+    else if (g.part === "end") end = Math.max(round1(g.end0 + dt), g.start0 + MIN_LEN);
+    else {
+      start = Math.max(0, round1(g.start0 + dt));
+      end = start + (g.end0 - g.start0);
+    }
+    if (Math.abs(dt) > 0.05) g.moved = true;
+    g.start = start;
+    g.end = end;
+    if (g.key === "draft") onDraft({ start, end });
+    else setGhost({ key: g.key, start, end });
+  };
+
+  const endFree = () => {
+    const g = freeDrag.current;
+    freeDrag.current = null;
+    if (!g) return;
+    if (g.moved && g.part === "move") {  // the click that follows a dragged box is not a selection
+      suppressClick.current = true;
+      setTimeout(() => (suppressClick.current = false), 0);
+    }
+    if (g.moved && g.key !== "draft") void saveInsert(Number(g.key.slice(4)), g.start, g.end);
+    else if (g.key !== "draft") setGhost(null);
+  };
+
+  // ---- exact values: right click on an edge
+  const askBorder = (e: React.MouseEvent, upper: Block, lower: Block) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const all = [...upper.words, ...lower.words];
+    const k0 = upper.words.length;
+    setMenu({
+      x: e.clientX,
+      y: e.clientY,
+      title: `Grenze ${upper.name} → ${lower.name}`,
+      fields: [{ key: "t", label: "Zeit der Grenze", value: (upper.end + lower.start) / 2 }],
+      info: (v) => {
+        const k = splitAt(all, v.t);
+        const n = Math.abs(k - k0);
+        return n === 0 ? "Keine Änderung" : `${n} ${n === 1 ? "Wort wechselt" : "Wörter wechseln"} · Grenze rastet bei ${fmtTime(all[k - 1].e)}–${fmtTime(all[k].s)} ein`;
+      },
+      apply: async (v) => {
+        setAnchor(sel === upper ? { ti: upper.words[0].ti, wi: upper.words[0].wi } : sel === lower ? { ti: lower.words.at(-1)!.ti, wi: lower.words.at(-1)!.wi } : anchor);
+        await commit(upper, lower, splitAt(all, v.t));
+      },
+      listen: (v) => play(v.t - LISTEN_S, v.t + LISTEN_S),
+    });
+  };
+
+  const askFree = (e: React.MouseEvent, key: string, part: "start" | "end", name: string, start: number, end: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const field = part === "start" ? { key: "t", label: "Anfang", value: start } : { key: "t", label: "Ende", value: end };
+    setMenu({
+      x: e.clientX,
+      y: e.clientY,
+      title: `${part === "start" ? "Anfang" : "Ende"} von ${name}`,
+      fields: [field],
+      info: (v) => {
+        const s = part === "start" ? v.t : start;
+        const en = part === "end" ? v.t : end;
+        if (s < 0 || en - s < MIN_LEN) return null;
+        if (en - s > 600) return null;
+        if (en > duration + 5) return null;
+        return `Dauer ${(en - s).toFixed(1)} s`;
+      },
+      apply: (v) => {
+        const s = part === "start" ? v.t : start;
+        const en = part === "end" ? v.t : end;
+        if (key === "draft") onDraft({ start: s, end: en });
+        else return saveInsert(Number(key.slice(4)), s, en);
+      },
+      listen: (v) => play(v.t - LISTEN_S, v.t + LISTEN_S),
+    });
   };
 
   const pick = (b: Block) => {
     const w = b.words[Math.floor(b.words.length / 2)];
     setAnchor({ ti: w.ti, wi: w.wi });
     scrollText(b.words[0].ti);
-    play(b.start, b.end);
+    if (!edit) play(b.start, b.end);
   };
 
   const borderTime = (a: Block | null, b: Block | null) => (a && b ? (a.end + b.start) / 2 : null);
+  const selSpan = sel ? span(sel) : null;
 
   return (
     <div className="flex h-full flex-col gap-2">
@@ -442,6 +646,16 @@ export function TimeRail({
           {playing && ps.playing ? <PauseIcon /> : <PlayIcon />}
         </Button>
         <span className="font-mono text-xs tabular-nums">{clock(playing ? ps.time : (sel?.start ?? 0))}</span>
+        <Button
+          size="sm"
+          variant={edit ? "default" : "outline"}
+          aria-pressed={edit}
+          onClick={() => setEdit(!edit)}
+          title="Größe ändern: Kanten und Boxen ziehen, ohne dass etwas abgespielt wird"
+        >
+          <MoveVerticalIcon />
+          Größe ändern
+        </Button>
         <label className="text-muted-foreground ml-auto flex items-center gap-1 text-[11px]" title="Maßstab: Sekunden pro Bildschirmhöhe">
           grob
           <input type="range" min={MIN_PPS} max={MAX_PPS} value={pps} onChange={(e) => setPps(Number(e.target.value))} className="w-20" />
@@ -458,6 +672,11 @@ export function TimeRail({
           </span>
         )}
       </label>
+      {edit && (
+        <p className="bg-primary/10 text-foreground rounded-md px-2 py-1 text-[11px] leading-snug">
+          <b>Größe ändern</b>, es wird nichts abgespielt. Kanten ziehen; eingefügte Absätze lassen sich auch als ganze Box verschieben. <b>Rechtsklick auf eine Kante</b>: genaue Zeit eingeben.
+        </p>
+      )}
 
       <div className="text-muted-foreground flex text-[11px] font-medium" style={{ paddingLeft: GUTTER }}>
         <span style={{ width: LANE }}>Interviewer</span>
@@ -472,7 +691,7 @@ export function TimeRail({
         onPointerEnter={() => (hovering.current = true)}
         onPointerLeave={() => (hovering.current = false)}
         onClick={(e) => {
-          if (e.target === e.currentTarget || (e.target as HTMLElement).dataset.bg) play(timeAt(e.clientY));
+          if (!edit && (e.target === e.currentTarget || (e.target as HTMLElement).dataset.bg)) play(timeAt(e.clientY));
         }}
       >
         <div data-bg="1" className="relative" style={{ height, width: RAIL_WIDTH }}>
@@ -482,86 +701,132 @@ export function TimeRail({
             const lane = GUTTER + b.lane * (LANE + GAP);
             const w = LANE / b.cols;
             const isSel = b === sel;
-            const h = Math.max((b.end - b.start) * pps, 5);
+            const { start, end } = span(b);
+            const h = Math.max((end - start) * pps, 5);
+            const typed = b.ins !== undefined;
+            const key = `ins:${b.ins}`;
             return (
               <button
                 key={b.key}
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
+                  if (suppressClick.current) {
+                    suppressClick.current = false;
+                    return;
+                  }
                   pick(b);
                 }}
-                title={`${b.name} · ${clock(b.start)}–${clock(b.end)} · ${b.words.length} Wörter`}
+                onPointerDown={edit && typed ? (e) => startFree(e, key, "move", b.start, b.end) : undefined}
+                onPointerMove={edit && typed ? moveFree : undefined}
+                onPointerUp={edit && typed ? endFree : undefined}
+                onPointerCancel={edit && typed ? endFree : undefined}
+                title={`${b.name} · ${fmtTime(start)}–${fmtTime(end)} · ${b.words.length} Wörter`}
                 className={cn(
                   "absolute overflow-hidden rounded-sm border text-left text-[10px] leading-tight",
                   b.role === "interviewer" ? "bg-question/20 border-question/70" : "bg-foreground/10 border-foreground/35",
-                  b.ins !== undefined && "border-dashed",
+                  typed && "border-dashed",
+                  edit && typed && "cursor-move touch-none",
                   isSel && "ring-primary z-10 ring-2",
-                  playing && ps.time >= b.start && ps.time <= b.end && "brightness-95",
+                  playing && ps.time >= start && ps.time <= end && "brightness-95",
                 )}
-                style={{ top: b.start * pps, height: h, left: lane + b.col * w, width: w - 2 }}
+                style={{ top: start * pps, height: h, left: lane + b.col * w, width: w - 2 }}
               >
-                {h > 16 && <span className="block truncate px-1 pt-0.5 font-medium">{clock(b.start)}</span>}
+                {h > 16 && <span className="block truncate px-1 pt-0.5 font-medium">{clock(start)}</span>}
               </button>
             );
           })}
 
-          {sel && (
-            <>
-              {canMoveTop && <Handle top={((above!.end + sel.start) / 2) * pps} label="Anfang" onDown={(e) => startDrag(e, "top")} onMove={moveDrag} onUp={() => endDrag(above, sel)} />}
-              {canMoveBottom && <Handle top={((sel.end + below!.start) / 2) * pps} label="Ende" onDown={(e) => startDrag(e, "bottom")} onMove={moveDrag} onUp={() => endDrag(sel, below)} />}
-            </>
-          )}
+          {/* resize mode: every border between two recorded blocks, and the edges of typed-in boxes */}
+          {edit &&
+            blocks.slice(0, -1).map((a, i) => {
+              const b = blocks[i + 1];
+              if (!movable(a, b)) return null;
+              const t = (a.end + b.start) / 2;
+              return (
+                <Handle
+                  key={`${a.key}|${b.key}`}
+                  top={t * pps}
+                  label={fmtTime(t)}
+                  title="Grenze verschieben (ziehen) · Rechtsklick: genaue Zeit"
+                  onDown={(e) => startBorder(e, a, b)}
+                  onMove={moveBorder}
+                  onUp={() => endBorder(a, b)}
+                  onMenu={(e) => askBorder(e, a, b)}
+                />
+              );
+            })}
+          {edit &&
+            blocks
+              .filter((b) => b.ins !== undefined)
+              .map((b) => {
+                const key = `ins:${b.ins}`;
+                const { start, end } = span(b);
+                const lane = GUTTER + b.lane * (LANE + GAP);
+                return (["start", "end"] as const).map((part) => (
+                  <EdgeTab
+                    key={`${key}:${part}`}
+                    part={part}
+                    time={part === "start" ? start : end}
+                    top={(part === "start" ? start : end) * pps}
+                    left={lane}
+                    title={`${part === "start" ? "Anfang" : "Ende"} ziehen · Rechtsklick: genaue Zeit`}
+                    onDown={(e) => startFree(e, key, part, b.start, b.end)}
+                    onMove={moveFree}
+                    onUp={endFree}
+                    onMenu={(e) => askFree(e, key, part, b.name, start, end)}
+                  />
+                ));
+              })}
 
           {draft && (
             <div
-              className="border-primary bg-primary/15 pointer-events-none absolute z-20 rounded-sm border-2 border-dashed"
+              className={cn("border-primary bg-primary/15 absolute z-20 rounded-sm border-2 border-dashed", edit ? "cursor-move touch-none" : "pointer-events-none")}
               style={{ top: draft.start * pps, height: Math.max((draft.end - draft.start) * pps, 6), left: GUTTER + draftLane * (LANE + GAP), width: LANE - 2 }}
+              onPointerDown={edit ? (e) => startFree(e, "draft", "move", draft.start, draft.end) : undefined}
+              onPointerMove={edit ? moveFree : undefined}
+              onPointerUp={edit ? endFree : undefined}
+              onPointerCancel={edit ? endFree : undefined}
             >
               <span className="bg-primary text-primary-foreground absolute -top-px left-0 rounded-br px-1 text-[9px] font-semibold">neu</span>
             </div>
           )}
           {draft &&
-            (["start", "end"] as const).map((edge) => (
-              <div
-                key={edge}
-                role="separator"
-                aria-label={`Neuer Absatz: ${edge === "start" ? "Anfang" : "Ende"} verschieben`}
-                title={edge === "start" ? "Anfang des neuen Absatzes ziehen" : "Ende des neuen Absatzes ziehen"}
-                className="absolute z-30 -my-1.5 h-3 cursor-row-resize touch-none"
-                style={{ top: (edge === "start" ? draft.start : draft.end) * pps, left: GUTTER + draftLane * (LANE + GAP), width: LANE - 2 }}
-                onPointerDown={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  e.currentTarget.setPointerCapture(e.pointerId);
-                  draftEdge.current = edge;
-                }}
-                onPointerMove={moveDraftEdge}
-                onPointerUp={endDraftEdge}
-                onPointerCancel={endDraftEdge}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="bg-primary mx-auto mt-1 h-1 w-10 rounded-full" />
-              </div>
+            (["start", "end"] as const).map((part) => (
+              <EdgeTab
+                key={part}
+                part={part}
+                time={part === "start" ? draft.start : draft.end}
+                top={(part === "start" ? draft.start : draft.end) * pps}
+                left={GUTTER + draftLane * (LANE + GAP)}
+                title={`Neuer Absatz: ${part === "start" ? "Anfang" : "Ende"} ziehen · Rechtsklick: genaue Zeit`}
+                onDown={(e) => startFree(e, "draft", part, draft.start, draft.end)}
+                onMove={moveFree}
+                onUp={endFree}
+                onMenu={(e) => askFree(e, "draft", part, "neuer Absatz", draft.start, draft.end)}
+              />
             ))}
 
           {drag && (
             <div className="bg-primary pointer-events-none absolute right-0 left-0 z-30 h-px" style={{ top: drag.t * pps }}>
               <span className="bg-primary text-primary-foreground absolute right-1 -translate-y-full rounded px-1 text-[10px]">
-                {clock(drag.t)} · {drag.moved} {drag.moved === 1 ? "Wort wechselt" : "Wörter wechseln"}
+                {fmtTime(drag.t)} · {drag.moved} {drag.moved === 1 ? "Wort wechselt" : "Wörter wechseln"}
               </span>
             </div>
           )}
 
-          {playing && <div className="bg-destructive pointer-events-none absolute right-0 left-0 z-20 h-0.5 transition-[top] duration-300 ease-linear" style={{ top: ps.time * pps }} />}
+          <div ref={head} className="bg-destructive pointer-events-none absolute right-0 left-0 z-20 hidden h-0.5">
+            <span ref={headLabel} className="bg-destructive absolute left-0 -translate-y-full rounded-tr px-1 font-mono text-[9px] text-white" />
+          </div>
         </div>
       </div>
+      {menu && <PreciseMenu menu={menu} onClose={() => setMenu(null)} />}
 
       <div className="min-h-[6.5rem] space-y-1.5 text-xs">
-        {sel ? (
+        {sel && selSpan ? (
           <>
             <p className="font-medium">
-              {sel.name} · {clock(sel.start)}–{clock(sel.end)} <span className="text-muted-foreground font-normal">({sel.words.length} Wörter)</span>
+              {sel.name} · {fmtTime(selSpan.start)}–{fmtTime(selSpan.end)} <span className="text-muted-foreground font-normal">({sel.words.length} Wörter)</span>
             </p>
             {sel.ins !== undefined && (
               <p className="flex items-center gap-2">
@@ -572,14 +837,14 @@ export function TimeRail({
               </p>
             )}
             <div className="flex flex-wrap items-center gap-1">
-              <Button size="xs" variant="outline" onClick={() => play(sel.start, sel.end)}>
+              <Button size="xs" variant="outline" onClick={() => play(selSpan.start, selSpan.end)}>
                 <PlayIcon />
                 Block
               </Button>
-              <Button size="xs" variant="outline" onClick={() => play(sel.start - 0.5, sel.start + LISTEN_S)}>
+              <Button size="xs" variant="outline" onClick={() => play(selSpan.start - 0.5, selSpan.start + LISTEN_S)}>
                 Anfang
               </Button>
-              <Button size="xs" variant="outline" onClick={() => play(sel.end - LISTEN_S, sel.end + 0.5)}>
+              <Button size="xs" variant="outline" onClick={() => play(selSpan.end - LISTEN_S, selSpan.end + 0.5)}>
                 Ende
               </Button>
             </div>
@@ -589,31 +854,94 @@ export function TimeRail({
             {canMoveBottom && (
               <Nudge label="Ende" at={borderTime(sel, below)} onLess={() => void nudge("bottom", -1)} onMore={() => void nudge("bottom", 1)} lessTitle="Ein Wort früher enden" moreTitle="Ein Wort später enden" />
             )}
+            {sel.ins === undefined && !canMoveTop && !canMoveBottom && <p className="text-muted-foreground">Dieser Block hat keinen aufgenommenen Nachbarn: seine Zeiten ergeben sich aus den Wörtern.</p>}
           </>
         ) : (
-          <p className="text-muted-foreground">Block anklicken: abspielen und seine Grenzen verschieben. In der freien Spur klicken spielt ab dort.</p>
+          <p className="text-muted-foreground">Block anklicken: abspielen. „Größe ändern“ einschalten, um Grenzen und Boxen zu verschieben, ohne abzuspielen.</p>
         )}
       </div>
     </div>
   );
 }
 
-function Handle({ top, label, onDown, onMove, onUp }: { top: number; label: string; onDown: (e: React.PointerEvent) => void; onMove: (e: React.PointerEvent) => void; onUp: () => void }) {
+/** The border between two recorded blocks: a line across both lanes with its time. */
+function Handle({
+  top,
+  label,
+  title,
+  onDown,
+  onMove,
+  onUp,
+  onMenu,
+}: {
+  top: number;
+  label: string;
+  title: string;
+  onDown: (e: React.PointerEvent) => void;
+  onMove: (e: React.PointerEvent) => void;
+  onUp: () => void;
+  onMenu: (e: React.MouseEvent) => void;
+}) {
   return (
     <div
       role="separator"
-      aria-label={`${label} verschieben`}
-      title={`${label} verschieben (ziehen)`}
+      aria-label="Grenze verschieben"
+      title={title}
       onPointerDown={onDown}
       onPointerMove={onMove}
       onPointerUp={onUp}
       onPointerCancel={onUp}
+      onContextMenu={onMenu}
       onClick={(e) => e.stopPropagation()}
       className="group absolute right-0 left-0 z-20 -my-2 flex h-4 cursor-row-resize touch-none items-center"
       style={{ top }}
     >
       <div className="bg-primary/70 group-hover:bg-primary h-0.5 w-full" />
-      <div className="bg-primary text-primary-foreground absolute left-1 rounded px-1 text-[9px] font-semibold">{label}</div>
+      <div className="bg-primary text-primary-foreground absolute left-1 rounded px-1 font-mono text-[9px] font-semibold">{label}</div>
+    </div>
+  );
+}
+
+/** A tab on the outside of the top or bottom edge of a box with free times, with the exact time on it. */
+function EdgeTab({
+  part,
+  time,
+  top,
+  left,
+  title,
+  onDown,
+  onMove,
+  onUp,
+  onMenu,
+}: {
+  part: "start" | "end";
+  time: number;
+  top: number;
+  left: number;
+  title: string;
+  onDown: (e: React.PointerEvent) => void;
+  onMove: (e: React.PointerEvent) => void;
+  onUp: () => void;
+  onMenu: (e: React.MouseEvent) => void;
+}) {
+  return (
+    <div
+      role="separator"
+      aria-label={`${part === "start" ? "Anfang" : "Ende"} verschieben`}
+      title={title}
+      onPointerDown={onDown}
+      onPointerMove={onMove}
+      onPointerUp={onUp}
+      onPointerCancel={onUp}
+      onContextMenu={onMenu}
+      onClick={(e) => e.stopPropagation()}
+      className="absolute z-30 flex h-4 cursor-row-resize touch-none items-center justify-center"
+      style={{ top: part === "start" ? top - 16 : top, left, width: LANE - 2 }}
+    >
+      <div className="bg-primary text-primary-foreground flex items-center gap-1 rounded px-1.5 py-px font-mono text-[9px] font-semibold shadow">
+        <span aria-hidden>{part === "start" ? "▲" : "▼"}</span>
+        {fmtTime(time)}
+      </div>
     </div>
   );
 }
@@ -630,7 +958,7 @@ function Nudge({ label, at, onLess, onMore, lessTitle, moreTitle }: { label: str
       <Button size="icon-xs" variant="outline" onClick={onMore} title={moreTitle}>
         <ChevronDownIcon />
       </Button>
-      <span className="text-muted-foreground font-mono">{at !== null ? clock(at) : ""}</span>
+      <span className="text-muted-foreground font-mono">{at !== null ? fmtTime(at) : ""}</span>
     </div>
   );
 }

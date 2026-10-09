@@ -114,6 +114,26 @@ zeitlich überlappen, teilen sich ihre Spur nebeneinander.
 - Gespeichert wird als Sprecherkorrektur (wie beim Markieren von Wörtern); die Analyse zeigt danach
   „veraltet“, bis du „Analyse aktualisieren“ wählst.
 
+**Modus „Größe ändern“.** Der Knopf über der Zeitspur schaltet zwischen *Abspielen* und
+*Verschieben* um. Solange er an ist, spielt ein Klick nichts ab; dafür zeigt die Spur an **jeder**
+Grenze zwischen zwei aufgenommenen Blöcken eine Linie mit ihrer genauen Zeit (ziehen: die Wörter
+dazwischen wechseln den Sprecher) und an jedem eingefügten Absatz zwei Griffe „▲ Anfang“ und
+„▼ Ende“ mit Zeit. **Eine eingefügte Box lässt sich als Ganzes verschieben** (sie behält ihre
+Länge) und über die Griffe größer oder kleiner ziehen; das wird sofort gespeichert. Bei einem
+Absatz, den du gerade erst tippst, gilt dasselbe, ohne den Modus einzuschalten.
+
+**Rechtsklick auf eine Kante** öffnet ein kleines Fenster, in dem du die Zeit genau eingibst
+(`3:07.4` oder `187,4`), mit **Hörprobe** vor dem Übernehmen. Bei einer Grenze zwischen zwei
+aufgenommenen Blöcken steht dabei, wie viele Wörter wechseln: Die Grenze rastet zwischen zwei Wörtern
+ein, weil der Sprecher je Wort gespeichert wird. Ein Block ohne aufgenommenen Nachbarn (der erste
+und der letzte) hat keine Grenze zum Schieben: Seine Zeiten ergeben sich aus den Wörtern.
+
+**Ist die Spur im Takt mit der Aufnahme?** Die Zeiten der aufgenommenen Wörter stammen aus der
+Spracherkennung (Wort-Ausrichtung) und sind auf Bruchteile einer Sekunde genau; die Spur zeichnet
+sie ohne Versatz. Die rote Wiedergabelinie liest die Uhr des Abspielers bei jedem Bildschirmbild
+und zeigt die Zeit an. Zum Prüfen: Eine Kante im Modus „Größe ändern“ anwählen, mit Rechtsklick
+genau eingeben und **Hörprobe** drücken, dann hörst du zwei Sekunden um diese Zeit.
+
 **Einen Absatz einfügen (+).** Hat die Erkennung einen Einwurf oder einen ganzen Beitrag verpasst
 (z. B. ein „Mhm“ der Interviewerin), steht zwischen zwei Absätzen ein kleines **+**. Es öffnet
 einen Editor unter dem Absatz: **Wer spricht?** (Interviewer oder Befragte:r, bei mehr Personen
