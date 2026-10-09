@@ -24,9 +24,13 @@ from collections.abc import Callable
 
 import numpy as np
 
-from interis.analysis.sentences import Sentence
+from interis.analysis.roles import interviewer_by_voice
+from interis.analysis.sentences import Sentence, split_sentences
+from interis.pipeline.merge import group_words
+from interis.pipeline.types import Turn
 
 Embed = Callable[[float, float], np.ndarray]
+SAMPLE_RATE = 16000
 LEAST_LIKE_SHARE = 0.3  # with a profile: this share of sentences teaches the other voice
 
 
@@ -106,11 +110,20 @@ def reassign(sentences: list[Sentence], words_of: Callable[[Sentence], list], em
     return changes, stats
 
 
-def voice_of(sentences: list[Sentence], embed: Embed, speaker: str, min_s: float = 1.0,
-             progress: Callable[[float], None] | None = None) -> np.ndarray:
-    """A voice profile: the mean embedding of all of ``speaker``'s sentences (of a
-    transcript whose speakers you checked)."""
-    own = [s for s in sentences if s.speaker == speaker and s.end - s.start >= min_s]
+OUTLIER_SIGMA = 2.0  # sentences this far below the mean similarity are not the speaker
+MIN_FOR_FILTER = 8
+
+
+def learn_voice(sentences: list[Sentence], embed: Embed, speaker: str, min_s: float = 1.0,
+                progress: Callable[[float], None] | None = None,
+                until: float | None = None) -> dict:
+    """A voice profile from ``speaker``'s sentences of a transcript whose speakers you
+    checked: the mean embedding, after dropping sentences that sound unlike the rest
+    (a wrongly assigned sentence would otherwise pull the profile towards the other
+    person). ``until``: only the part of the transcript up to this second was checked.
+    Returns ``{embedding, seconds, n_segments}``."""
+    own = [s for s in sentences if s.speaker == speaker and s.end - s.start >= min_s
+           and (until is None or s.end <= until)]
     if len(own) < 5:
         raise ValueError(f"too few sentences of {speaker} to learn the voice (at least 5 of "
                          f"{min_s:g} s or longer)")
@@ -119,4 +132,56 @@ def voice_of(sentences: list[Sentence], embed: Embed, speaker: str, min_s: float
         vecs.append(unit(embed(s.start, s.end)))
         if progress:
             progress((n + 1) / len(own))
-    return unit(np.mean(vecs, axis=0))
+    mat = np.vstack(vecs)
+    secs = np.array([s.end - s.start for s in own])
+    centre = unit(mat.mean(axis=0))
+    if len(own) >= MIN_FOR_FILTER:
+        sims = mat @ centre
+        keep = sims >= sims.mean() - OUTLIER_SIGMA * sims.std()
+        if keep.sum() >= 5:
+            mat, secs = mat[keep], secs[keep]
+            centre = unit(mat.mean(axis=0))
+    return {"embedding": centre, "seconds": float(secs.sum()), "n_segments": int(len(secs))}
+
+
+def voice_of(sentences: list[Sentence], embed: Embed, speaker: str, min_s: float = 1.0,
+             progress: Callable[[float], None] | None = None) -> np.ndarray:
+    """The embedding of :func:`learn_voice`."""
+    return learn_voice(sentences, embed, speaker, min_s, progress)["embedding"]
+
+
+def assign_by_voice(turns: list[Turn], audio: np.ndarray,
+                    embed_audio: Callable[[np.ndarray], np.ndarray], voice: dict,
+                    speaker_embeddings: dict[str, list[float]], margin: float,
+                    boundaries: list[float] | tuple[float, ...] = (),
+                    min_s: float = 1.0) -> tuple[list[Turn], dict]:
+    """During transcription: give every sentence to the voice it is clearly closer to, with
+    the interviewer's voice from the profile and the other person's learned from the
+    sentences that sound least like the interviewer (see :func:`reassign`). Two speakers
+    only; anything else leaves the turns as the diarization made them.
+    Returns the new turns and a report (counts, or why nothing was done)."""
+    labels = sorted({t.speaker for t in turns if t.speaker is not None})
+    if len(labels) != 2 or any(lab not in speaker_embeddings for lab in labels):
+        return turns, {"applied": False, "reason": "needs exactly two diarized speakers"}
+    interviewer, _ = interviewer_by_voice(voice, speaker_embeddings, labels)
+    if interviewer is None:
+        return turns, {"applied": False, "reason": "interviewer's voice not clearly found"}
+    sentences = split_sentences(turns)
+
+    def words_of(s: Sentence) -> list:
+        return [(s.turn, i, turns[s.turn].words[i]) for i in range(s.first, s.last + 1)]
+
+    def crop(a: float, b: float) -> np.ndarray:
+        return embed_audio(audio[int(a * SAMPLE_RATE):int(b * SAMPLE_RATE)])
+
+    try:
+        changes, stats = reassign(sentences, words_of, crop, 0.0, margin, min_s,
+                                  voice=np.asarray(voice["embedding"], dtype=float),
+                                  labels=labels, interviewer=interviewer)
+    except ValueError as e:
+        return turns, {"applied": False, "reason": str(e)}
+    for c in changes:
+        turns[c["turn"]].words[c["word"]].speaker = c["speaker"]
+    if changes:
+        turns = group_words([w for t in turns for w in t.words], boundaries)
+    return turns, {"applied": True, "margin": margin, **stats}

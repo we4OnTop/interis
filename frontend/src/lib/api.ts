@@ -25,7 +25,7 @@ export interface ProjectSummary extends Project {
 
 export interface Job {
   id: number;
-  kind: "transcribe" | "analyze" | "speakers";
+  kind: "transcribe" | "analyze" | "speakers" | "trial" | "tune";
   interview_id: string;
   status: "queued" | "running" | "done" | "failed" | "cancelled";
   options: Partial<TranscriptionSettings> & { preset?: string };
@@ -54,6 +54,10 @@ export interface TranscriptionSettings {
   wpe_taps: number;
   wpe_delay: number;
   wpe_iterations: number;
+  /** with a voice profile: each sentence goes to the voice it is clearly closer to; null: off */
+  voice_margin: number | null;
+  /** terms learned from your corrections by the automatic tuning */
+  glossary: string[];
 }
 
 export interface Preset {
@@ -475,4 +479,29 @@ declare global {
 export async function pickFolder(start?: string): Promise<string | null | undefined> {
   if (!window.pywebview?.api) return undefined;
   return window.pywebview.api.pick_folder(start ?? "");
+}
+
+export interface ErrorRates {
+  wer: number;
+  speaker_error: number;
+  ref_words: number;
+}
+
+export interface TuneReport {
+  changed: Record<string, string | number | boolean | null>;
+  improved: boolean;
+  held_out: boolean;
+  windows: string[];
+  baseline: { validation: ErrorRates };
+  best: { validation: ErrorRates };
+  evaluations: number;
+  stopped: string;
+  note: string | null;
+  glossary: number;
+}
+
+export interface TuningState {
+  job: Job | null;
+  report: TuneReport | null;
+  has_profile: boolean;
 }

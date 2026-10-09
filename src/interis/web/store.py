@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS audio_parts (
 CREATE TABLE IF NOT EXISTS jobs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     kind         TEXT NOT NULL CHECK (kind IN ('transcribe', 'analyze', 'models', 'trial',
-                                                  'speakers')),
+                                                  'speakers', 'tune')),
     interview_id TEXT NOT NULL,
     options      TEXT NOT NULL DEFAULT '{}',
     status       TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed',
@@ -149,7 +149,7 @@ class Store:
         with self._conn() as c:
             c.executescript(SCHEMA)
             sql = c.execute("SELECT sql FROM sqlite_master WHERE name = 'jobs'").fetchone()
-            if sql and "'speakers'" not in sql["sql"]:  # databases before the newest kind
+            if sql and "'tune'" not in sql["sql"]:  # databases before the newest kind
                 c.execute("ALTER TABLE jobs RENAME TO jobs_old")
                 c.executescript(SCHEMA)
                 c.execute("INSERT INTO jobs SELECT * FROM jobs_old")

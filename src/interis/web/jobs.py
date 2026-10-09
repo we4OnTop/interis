@@ -25,6 +25,7 @@ from pathlib import Path
 
 from interis._bootstrap import OFFLINE, proxy_env_removed
 from interis.config import Paths
+from interis.pipeline.tune import merge_hotwords
 from interis.web.store import Store
 
 POLL_S = 1.0
@@ -32,7 +33,8 @@ POLL_S = 1.0
 # Transcription settings (a job's options) and their command line flags.
 SETTING_FLAGS = {"model": "--model", "compute_type": "--compute-type",
                  "beam_size": "--beam-size", "vad_threshold": "--vad-threshold",
-                 "speakers": "--speakers", "min_duration_off": "--min-duration-off"}
+                 "speakers": "--speakers", "min_duration_off": "--min-duration-off",
+                 "voice_margin": "--voice-margin"}
 
 
 def settings_args(options: dict) -> list[str]:
@@ -138,6 +140,13 @@ class JobRunner:
         options = job["options"]
         if job["kind"] == "trial":  # an excerpt with other settings; touches no interview
             iid = str(options["interview"])
+        if job["kind"] == "tune":  # settings search on corrected stretches; touches no interview
+            cmd = [*base, "tune", "--progress-json"]
+            for w in options["windows"]:
+                cmd += ["--window", f"{w['interview']}:{float(w['start'])}-{float(w['end'])}"]
+            if options.get("budget_minutes"):
+                cmd += ["--budget-minutes", str(float(options["budget_minutes"]))]
+            return cmd
         guide = self.guide_file(iid)
         guide_args = ["--guide", str(guide)] if guide else []
         if job["kind"] == "speakers":
@@ -150,7 +159,10 @@ class JobRunner:
             cmd = [*base, "speakers", str(transcript), "--audio", *map(str, audio),
                    "--min-seconds", str(float(options["min_seconds"])), "--progress-json"]
             if options.get("learn"):  # learn the interviewer's voice profile
-                return [*cmd, "--save-voice", "interviewer", "--speaker", str(options["learn"])]
+                cmd += ["--save-voice", "interviewer", "--speaker", str(options["learn"])]
+                if options.get("until"):
+                    cmd += ["--learn-until", str(float(options["until"]))]
+                return [*cmd, "--replace-voice"] if options.get("replace") else cmd
             cmd += ["--until", str(float(options["until"])),
                     "--margin", str(float(options["margin"])),
                     "--out", str(self._speakers_file(job))]
@@ -162,7 +174,8 @@ class JobRunner:
                 raise RuntimeError("Audiodatei nicht gefunden: " + ", ".join(missing))
             cmd = [*base, "transcribe", *map(str, audio), "--progress-json",
                    *settings_args(options)]
-            if hotwords := self.hotwords(iid):
+            # the project's glossary, then the terms learned from your corrections
+            if hotwords := merge_hotwords(self.hotwords(iid), options.get("glossary") or []):
                 cmd += ["--hotwords", hotwords]
             if job["kind"] == "trial":
                 out = trial_file(self.paths, job["id"])

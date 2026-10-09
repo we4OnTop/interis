@@ -595,6 +595,8 @@ function SpeakersByVoice({
   const [until, setUntil] = useState(d.voice_profile ? "0:00" : "1:00");
   const [margin, setMargin] = useState("0.1");
   const [minSeconds, setMinSeconds] = useState("1");
+  const [learnUntil, setLearnUntil] = useState("");
+  const [learnReplace, setLearnReplace] = useState(false);
   const [learnFrom, setLearnFrom] = useState(d.speakers.find((s) => s.role === "interviewer")?.label ?? d.speakers[0]?.label ?? "");
   const job = interview(d.id)?.job;
   const running = job?.kind === "speakers" && (job.status === "queued" || job.status === "running");
@@ -623,15 +625,25 @@ function SpeakersByVoice({
 
   const learn = async () => {
     const name = d.speakers.find((s) => s.label === learnFrom)?.display_name || learnFrom;
+    const [um, us] = learnUntil.includes(":") ? learnUntil.split(":").map(Number) : [0, Number(learnUntil)];
+    const untilSeconds = learnUntil.trim() === "" ? null : um * 60 + us;
+    if (untilSeconds !== null && (!Number.isFinite(untilSeconds) || untilSeconds < 30)) {
+      fail(new Error("„bis“: mindestens 0:30, z. B. 5:00 – oder leer für das ganze Gespräch"));
+      return;
+    }
     const ok = await confirm({
       title: `Stimmprofil aus „${name}“ in ${d.id} lernen?`,
       description:
-        "Nur sinnvoll, wenn die Sprecher dieses Gesprächs vollständig korrigiert sind. Ersetzt dein bisheriges Stimmprofil; es wird auch für die Interviewer-Erkennung neuer Transkripte verwendet.",
+        (untilSeconds === null
+          ? "Nur sinnvoll, wenn die Sprecher dieses Gesprächs vollständig korrigiert sind. "
+          : "Es zählen nur die Sätze bis zu dieser Zeit; sie müssen korrigiert sein. ") +
+        (learnReplace ? "Dein bisheriges Stimmprofil wird ersetzt. " : "Dein bisheriges Stimmprofil wird verfeinert, nicht ersetzt. ") +
+        "Es wird auch für die Interviewer-Erkennung neuer Transkripte verwendet.",
       confirm: "Lernen",
     });
     if (!ok) return;
     try {
-      await api("POST", `/api/interviews/${enc(d.id)}/voice-profile`, { speaker: learnFrom });
+      await api("POST", `/api/interviews/${enc(d.id)}/voice-profile`, { speaker: learnFrom, until: untilSeconds, replace: learnReplace });
       notify("Läuft im Hintergrund – danach steht das Stimmprofil in allen Gesprächen bereit");
       setOpen(false);
       onChanged();
@@ -746,11 +758,20 @@ function SpeakersByVoice({
                 </SelectContent>
               </Select>
             </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="learn-until">nur bis (min:s)</Label>
+              <Input id="learn-until" className="w-24" value={learnUntil} placeholder="alles" onChange={(e) => setLearnUntil(e.target.value)} />
+            </div>
+            <Label className="pb-2 text-sm font-normal">
+              <Checkbox checked={learnReplace} onCheckedChange={(c) => setLearnReplace(c === true)} />
+              neu beginnen
+            </Label>
             <Button variant="outline" onClick={() => void learn()} disabled={!learnFrom}>
               Stimme lernen
             </Button>
             <p className="text-muted-foreground w-full text-xs">
-              Wenn die Sprecher dieses Gesprächs vollständig stimmen: deine Stimme (Interviewer) wählen. Gilt danach für alle Gespräche.
+              Deine Stimme (Interviewer) wählen. Stimmen die Sprecher nur am Anfang, gib an, bis wohin. Jedes weitere Gespräch verfeinert das Profil
+              (sich einschleichende falsche Sätze werden aussortiert); „neu beginnen“ ersetzt es. Gilt danach für alle Gespräche.
             </p>
           </div>
           <DialogFooter>

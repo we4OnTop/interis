@@ -74,6 +74,8 @@ export const STAGE_LABEL: Record<string, string> = {
   decode: "Audio lesen",
   dereverb: "Hall reduzieren",
   speakers: "Sprecher nach Stimme zuordnen",
+  voice: "Sätze nach Stimme zuordnen",
+  tune: "Einstellungen vergleichen",
   transcribe: "Spracherkennung",
   align: "Wörter ausrichten",
   diarize: "Sprechertrennung",

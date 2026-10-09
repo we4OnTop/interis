@@ -111,6 +111,45 @@ Referenz: die Stimme der befragten Person lernt Interis aus den Sätzen, die am 
 dir klingen (sie spricht im Interview meist am meisten). Das Profil nutzt auch die
 Interviewer-Erkennung neuer Transkripte. Gilt für Gespräche zu zweit.
 
+**Das Stimmprofil wird besser, je mehr du korrigierst.** „Stimme lernen“ ersetzt das Profil
+nicht, sondern ergänzt es: die Stimmabdrücke werden nach der Menge an Sprache gewichtet
+gemittelt. Hast du nur den Anfang korrigiert, gib im Dialog an, bis wohin (nur diese Sätze
+zählen). Sätze, die klanglich nicht zum Rest passen (z. B. ein falsch zugeordneter Satz),
+werden aussortiert, damit sie das Profil nicht verfälschen. Das Profil enthält nur den
+Abdruck und Zahlen (Sprechzeit, Anzahl der Abschnitte, aus welchen Gesprächen), nie Text.
+
+**Sätze nach Stimme beim Transkribieren.** In den Transkriptions-Einstellungen („Sätze nach
+Stimme zuordnen“) bekommt jeder Satz schon beim Transkribieren die Stimme, der er deutlich
+ähnlicher klingt; die Stimme der befragten Person wird dafür aus den Sätzen gelernt, die am
+wenigsten nach dir klingen. Das Ergebnis steht direkt im Transkript, ohne dass du „Sprecher
+nach Stimme“ von Hand startest. Es braucht ein Stimmprofil und gilt für Gespräche zu zweit.
+
+**Einstellungen automatisch optimieren.** Auf der Seite „Transkription“ (Karte „Automatisch
+optimieren“) wählst du ein oder mehrere Ausschnitte (je 3–15 Minuten), die du korrigiert
+hast – oder ein Gespräch mit gesetztem „Korrektur abgeschlossen“. Dein korrigierter Text
+(Wortkorrekturen und Sprecherkorrekturen) ist der Maßstab. Interis transkribiert die
+Ausschnitte mit verschiedenen Einstellungen neu und misst
+
+- **falsche Wörter** (Wortfehlerrate) und
+- **falsch zugeordnete Wörter** („wer hat es gesagt“; unabhängig davon, wie die Sprecher
+  benannt sind).
+
+Probiert werden: Sprecher pro Satz, Sprecherpausen, Sätze nach Stimme (mit Profil),
+Glossar aus deinen Korrekturen, Sprach-Empfindlichkeit, Beam, Raummikrofon, Hall reduzieren
+und Rechengenauigkeit. Ein Verfahren wie Gradient Descent passt dafür nicht, weil die
+Einstellungen diskret sind und jede Messung eine ganze Transkription ist. Stattdessen wird
+jede Einstellung einzeln verändert und der beste Wert behalten, bis eine ganze Runde nichts
+mehr bringt (Koordinatenabstieg). Einstellungen, die nur spätere Schritte betreffen, kommen
+zuerst, weil sie die schon berechnete Spracherkennung wiederverwenden.
+
+Mit zwei oder mehr Ausschnitten wird einer zurückgehalten: Die Suche sieht ihn nicht, und das
+Ergebnis wird nur übernommen, wenn es auch dort besser ist. Mit einem Ausschnitt weist
+Interis darauf hin, dass das Ergebnis nicht an ungesehenen Daten geprüft wurde. Ist etwas
+besser, entsteht die Einstellung „Optimiert <Datum>“, die zum Standard wird; die bisherige
+Einstellung bleibt erhalten und lässt sich oben wieder als Standard wählen. Zahlen im
+korrigierten Text so schreiben, wie Whisper sie ausgibt (`fünf` statt `5`), sonst zählt
+das als Fehler. Auf der Kommandozeile: `interis tune --window I01:0-300 --window I02:600-900`.
+
 Korrekturen und Sprecherkorrekturen machen die Analyse veraltet, wie Glättungen. Danach „Analyse aktualisieren“ wählen,
 damit die Fragenerkennung den korrigierten Text nutzt.
 

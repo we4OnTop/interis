@@ -85,6 +85,21 @@ def by_sentence(segments: list[Segment]) -> None:
                 sentence = []
 
 
+def group_words(words: list[Word], boundaries: list[float] | tuple[float, ...] = ()
+                ) -> list[Turn]:
+    """Consecutive words of one speaker form a turn; a turn never spans a break between
+    two recordings (``boundaries``: start times of recording parts 2, 3, …)."""
+    turns: list[Turn] = []
+    for w in words:
+        same_part = bool(turns) and not any(turns[-1].end <= b <= w.start for b in boundaries)
+        if turns and same_part and turns[-1].speaker == w.speaker:
+            turns[-1].words.append(w)
+            turns[-1].end = max(turns[-1].end, w.end)
+        else:
+            turns.append(Turn(w.speaker, w.start, w.end, [w]))
+    return turns
+
+
 def build_turns(segments: list[Segment], diarization: Diarization | None,
                 boundaries: list[float] | tuple[float, ...] = (),
                 sentence_level: bool = False) -> list[Turn]:
@@ -98,12 +113,4 @@ def build_turns(segments: list[Segment], diarization: Diarization | None,
     assign_speakers(words, diarization)
     if sentence_level:
         by_sentence(segments)
-    turns: list[Turn] = []
-    for w in words:
-        same_part = bool(turns) and not any(turns[-1].end <= b <= w.start for b in boundaries)
-        if turns and same_part and turns[-1].speaker == w.speaker:
-            turns[-1].words.append(w)
-            turns[-1].end = max(turns[-1].end, w.end)
-        else:
-            turns.append(Turn(w.speaker, w.start, w.end, [w]))
-    return turns
+    return group_words(words, boundaries)

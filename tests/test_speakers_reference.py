@@ -203,3 +203,27 @@ def test_learning_the_voice_profile_is_a_job_too(tmp_path):
     use = runner.command(store.job(store.add_job("speakers", "T1", {
         "until": 0.0, "margin": 0.1, "min_seconds": 1.0, "use_voice": True})))
     assert use[use.index("--voice") + 1] == "interviewer" and "--out" in use
+
+
+def test_learning_can_be_limited_and_refine_or_replace(tmp_path):
+    from interis.config import Paths
+    from interis.web.jobs import JobRunner
+    from interis.web.store import Store
+
+    paths = Paths(tmp_path)
+    paths.ensure()
+    store = Store(tmp_path / "interis.db")
+    (tmp_path / "exports" / "T1").mkdir(parents=True)
+    (tmp_path / "exports" / "T1" / "T1.json").write_text("{}", encoding="utf-8")
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"x")
+    store.register_parts("T1", [audio])
+    runner = JobRunner(paths, store, lambda _i: None, lambda _i: "")
+
+    def cmd(options):
+        return runner.command(store.job(store.add_job("speakers", "T1", options)))
+
+    plain = cmd({"learn": "S1", "min_seconds": 1.0})
+    assert "--learn-until" not in plain and "--replace-voice" not in plain
+    limited = cmd({"learn": "S1", "min_seconds": 1.0, "until": 300.0, "replace": True})
+    assert limited[limited.index("--learn-until") + 1] == "300.0" and "--replace-voice" in limited

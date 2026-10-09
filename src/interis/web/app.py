@@ -180,6 +180,8 @@ class ReferenceRequest(BaseModel):
 
 class VoiceLearn(BaseModel):
     speaker: str = Field(max_length=60)
+    until: float | None = Field(default=None, ge=0, le=24 * 3600)  # only this much was checked
+    replace: bool = False  # start the profile over instead of refining it
 
 
 class ReviewedUpdate(BaseModel):
@@ -874,11 +876,15 @@ def create_app(paths: Paths, login_token: str, port: int,
 
     @app.post("/api/interviews/{interview}/voice-profile")
     def learn_voice(interview: str, body: VoiceLearn) -> dict[str, int]:
-        """Learn the interviewer's voice profile from this interview's ``speaker`` (all
-        their sentences, speaker corrections applied). Replaces the existing profile."""
+        """Refine the interviewer's voice profile with this interview's ``speaker`` (their
+        sentences, speaker corrections applied; up to ``until`` if only the start was
+        checked). ``replace`` starts the profile over."""
         if body.speaker not in {s["label"] for s in _transcript(interview).speakers}:
             raise HTTPException(422, "unknown speaker")
-        return {"job": _speakers_job(interview, {"learn": body.speaker, "min_seconds": 1.0})}
+        options = {"learn": body.speaker, "min_seconds": 1.0, "replace": body.replace}
+        if body.until:
+            options["until"] = body.until
+        return {"job": _speakers_job(interview, options)}
 
     def _speakers_job(interview: str, options: dict[str, Any]) -> int:
         _interview_in_project(interview)

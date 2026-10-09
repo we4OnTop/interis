@@ -13,6 +13,7 @@ import { useFeedback } from "@/lib/feedback";
 import { clock, MODEL_LABEL, STAGE_LABEL } from "@/lib/format";
 import { usePlayer } from "@/lib/player";
 import { useProject } from "@/lib/project";
+import { TuningCard } from "@/pages/setup/TuningCard";
 import { cn } from "@/lib/utils";
 
 const BUILTIN = "builtin";
@@ -29,6 +30,8 @@ export function settingsSummary(s: Partial<TranscriptionSettings>): string {
     s.speakers === 0 ? "Sprecher auto" : s.speakers && s.speakers !== 2 ? `${s.speakers} Sprecher` : null,
     s.min_duration_off != null ? `Pausen ${s.min_duration_off} s` : null,
     s.sentence_level ? "Sprecher pro Satz" : null,
+    s.voice_margin != null ? `Stimme ±${s.voice_margin}` : null,
+    s.glossary?.length ? `${s.glossary.length} gelernte Begriffe` : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -387,6 +390,27 @@ export function TranscriptionTab() {
               </span>
             </label>
             <NumberField
+              id="vmargin"
+              label="Sätze nach Stimme zuordnen"
+              value={form.voice_margin}
+              onChange={(v) => set("voice_margin", v)}
+              min={0.01}
+              max={0.9}
+              step={0.05}
+              placeholder="aus"
+              help="Braucht ein Stimmprofil („Stimme lernen“ im Transkript). Jeder Satz geht an die Stimme, der er deutlich ähnlicher klingt; der Wert ist der nötige Abstand (z. B. 0.1). Leer = aus. Nur für Gespräche zu zweit."
+            />
+            {form.glossary.length > 0 && (
+              <div className="grid content-start gap-1.5">
+                <Label>Gelernte Begriffe</Label>
+                <p className="text-muted-foreground text-xs">{form.glossary.join(", ")}</p>
+                <Button variant="ghost" size="xs" className="w-fit" onClick={() => set("glossary", [])}>
+                  <XIcon />
+                  Begriffe entfernen
+                </Button>
+              </div>
+            )}
+            <NumberField
               id="mdo"
               label="Sprecherpausen überbrücken (s)"
               value={form.min_duration_off}
@@ -469,6 +493,8 @@ export function TranscriptionTab() {
           )}
         </CardContent>
       </Card>
+
+      <TuningCard />
 
       {trials.length > 0 && (
         <Card className="gap-4">

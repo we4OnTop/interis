@@ -76,10 +76,10 @@ def cmd_doctor(args: argparse.Namespace, paths: Paths) -> int:
 def _analysis_options(args: argparse.Namespace, paths: Paths, redo_roles: bool):
     from interis.analysis.analyze import AnalysisOptions
     from interis.analysis.guide import load_guide
-    from interis.analysis.roles import load_voice
+    from interis.analysis.roles import load_voice, voice_file
 
     guide = load_guide(Path(args.guide)) if args.guide else None
-    voice = load_voice(paths.voices / f"{args.voice}.json")
+    voice = load_voice(voice_file(paths.voices, args.voice))
     if voice is None and redo_roles:
         print(f"Note: no voice profile '{args.voice}' – interviewer is guessed from the share "
               "of questions (run `interis enroll` for voice-based recognition).")
@@ -116,7 +116,7 @@ def _summary(transcript) -> str:
 
 
 def cmd_enroll(args: argparse.Namespace, paths: Paths) -> int:
-    from interis.analysis.roles import save_voice, voice_embedding
+    from interis.analysis.roles import save_voice, voice_embedding, voice_file
     from interis.models import DIARIZATION_MODEL, MODELS, ModelError, verify_ready
     from interis.pipeline.run import decode
 
@@ -135,7 +135,7 @@ def cmd_enroll(args: argparse.Namespace, paths: Paths) -> int:
               file=sys.stderr)
         return 2
     embedding = voice_embedding(audio, model_dir)
-    target = paths.voices / f"{args.label}.json"
+    target = voice_file(paths.voices, args.label)
     save_voice(target, args.label, embedding, MODELS[DIARIZATION_MODEL].revision)
     print(f"Voice profile saved: {target}")
     return 0
@@ -170,9 +170,15 @@ def cmd_speakers(args: argparse.Namespace, paths: Paths) -> int:
     not changed."""
     import numpy as np
 
-    from interis.analysis.roles import load_voice, save_voice, voice_embedder
+    from interis.analysis.roles import (
+        load_voice,
+        merge_voice,
+        save_voice,
+        voice_embedder,
+        voice_file,
+    )
     from interis.analysis.sentences import split_sentences
-    from interis.analysis.speakers import reassign, voice_of
+    from interis.analysis.speakers import learn_voice, reassign
     from interis.models import (
         DIARIZATION_MODEL,
         MODELS,
@@ -196,7 +202,7 @@ def cmd_speakers(args: argparse.Namespace, paths: Paths) -> int:
         model_dir = verify_ready(paths, DIARIZATION_MODEL)
         voice = None
         if args.voice:
-            profile = load_voice(paths.voices / f"{args.voice}.json")
+            profile = load_voice(voice_file(paths.voices, args.voice))
             if profile is None:
                 raise ValueError(f"no voice profile '{args.voice}'")
             voice = np.asarray(profile["embedding"])
@@ -226,12 +232,18 @@ def cmd_speakers(args: argparse.Namespace, paths: Paths) -> int:
 
     try:
         if args.save_voice:
-            vec = voice_of(sentences, crop, args.speaker, args.min_seconds,
-                           lambda x: progress("speakers", x))
-            save_voice(paths.voices / f"{args.save_voice}.json", args.save_voice, vec,
-                       MODELS[DIARIZATION_MODEL].revision)
-            print(f"\nStimmprofil „{args.save_voice}“ aus {raw.meta.get('interview_id')} "
-                  "gespeichert")
+            target = voice_file(paths.voices, args.save_voice)
+            learned = learn_voice(sentences, crop, args.speaker, args.min_seconds,
+                                  lambda x: progress("speakers", x), args.learn_until)
+            revision = MODELS[DIARIZATION_MODEL].revision
+            source = str(raw.meta.get("interview_id"))
+            old = None if args.replace_voice else load_voice(target)
+            merged = merge_voice(old, learned, source, revision)
+            save_voice(target, args.save_voice, merged["embedding"], revision,
+                       **{k: v for k, v in merged.items() if k != "embedding"})
+            print(f"\nStimmprofil „{args.save_voice}“ aus {source} "
+                  f"{'ergänzt' if len(merged['sources']) > 1 else 'gespeichert'}: "
+                  f"{merged['seconds']:.0f} s aus {len(merged['sources'])} Abschnitt(en)")
             return 0
         interviewer = next((s["label"] for s in raw.speakers
                             if s.get("role") == "interviewer"), None)
@@ -347,6 +359,7 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
         dereverb=(args.wpe_taps, args.wpe_delay, args.wpe_iterations) if args.dereverb else None,
         clip=(args.start, args.duration) if args.duration else None,
         sentence_level=args.speaker_per_sentence,
+        voice_margin=args.voice_margin,
         steps_dir=Path(args.steps_dir) if args.steps_dir else None,
         interview_id=args.id,
         analysis=_analysis_options(args, paths, redo_roles=True),
@@ -379,6 +392,93 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
     print(f"{_summary(transcript)}")
     print(f"Done in {elapsed / 60:.1f} min for {duration / 60:.1f} min audio "
           f"(factor {elapsed / max(duration, 1):.2f}×). Output: {out_dir}")
+    return 0
+
+
+MAX_TUNE_WINDOW_S = 900.0
+
+
+def _tune_window(spec: str, paths: Paths, store):
+    """``ID:start-end`` (seconds; ``ID`` alone = from the start to the end of the interview)
+    -> the corrected stretch with its audio, checked against the stored recordings."""
+    from interis.models import sha256_file
+    from interis.pipeline.evaluate import reference_from_transcript
+    from interis.pipeline.tune import MIN_WINDOW_S, Window
+    from interis.pipeline.types import Transcript
+    from interis.web.edits import apply_edits
+
+    iid, _, span = spec.partition(":")
+    src = paths.exports / iid / f"{iid}.json"
+    if not src.is_file():
+        raise ValueError(f"{iid}: no transcript")
+    raw = Transcript.from_dict(json.loads(src.read_text(encoding="utf-8")))
+    files = store.part_paths(iid)
+    parts = raw.meta["audio"].get("parts") or []
+    if not files or len(files) != len(parts) or any(
+            not f.is_file() or sha256_file(f) != p["sha256"]
+            for f, p in zip(files, parts, strict=True)):
+        raise ValueError(f"{iid}: the recordings are missing or differ from the transcript")
+    start, _, end = span.partition("-")
+    a = float(start) if start else 0.0
+    b = float(end) if end else min(raw.meta["audio"]["duration_s"], a + MAX_TUNE_WINDOW_S)
+    if not 0 <= a < b <= raw.meta["audio"]["duration_s"] + 1:
+        raise ValueError(f"{iid}: time window outside the recording")
+    if b - a < MIN_WINDOW_S or b - a > MAX_TUNE_WINDOW_S:
+        raise ValueError(f"{iid}: the stretch must be between {MIN_WINDOW_S:.0f} s and "
+                         f"{MAX_TUNE_WINDOW_S / 60:.0f} min long")
+    effective = apply_edits(raw, store.word_edits(iid), store.speaker_edits(iid))
+    ref = reference_from_transcript(effective, a, b)
+    if len(ref.norm) < 50:
+        raise ValueError(f"{iid}: fewer than 50 words in this stretch")
+    return Window(iid, files, a, b, ref)
+
+
+def cmd_tune(args: argparse.Namespace, paths: Paths) -> int:
+    """Find the transcription settings closest to what you corrected (see
+    :mod:`interis.pipeline.tune`) and save them as a preset, which becomes the default."""
+    from datetime import datetime
+
+    from interis.analysis.analyze import AnalysisOptions
+    from interis.analysis.roles import load_voice, voice_file
+    from interis.models import ModelError
+    from interis.pipeline.tune import TuneError, make_runner, tune
+    from interis.web.store import Store
+    from interis.web.transcription import default_settings
+
+    store = Store(paths.root / "interis.db")
+    progress = _progress_json() if args.progress_json else _progress_printer()
+    try:
+        windows = [_tune_window(spec, paths, store) for spec in args.window]
+        voice = load_voice(voice_file(paths.voices, args.voice))
+        start = {k: v for k, v in default_settings(store).items() if k != "preset"}
+        report = tune(windows, make_runner(paths, AnalysisOptions(voice=voice), args.threads),
+                      start, has_profile=voice is not None, max_evals=args.max_evals,
+                      budget_s=args.budget_minutes * 60 if args.budget_minutes else None,
+                      progress=progress)
+    except (ModelError, TuneError, ValueError) as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        return 1
+    print()
+    tuning = paths.root / "tuning"
+    tuning.mkdir(exist_ok=True)
+    (tuning / "last.json").write_text(json.dumps(report, ensure_ascii=False, indent=2),
+                                      encoding="utf-8")
+    for label, key in (("vorher", "baseline"), ("nachher", "best")):
+        v = report[key]["validation"]
+        print(f"{label}: falsche Wörter {v['wer']:.1%}, falscher Sprecher "
+              f"{v['speaker_error']:.1%}"
+              + (" (an ungesehenem Ausschnitt)" if report["held_out"] else ""))
+    if report["note"]:
+        print(f"Hinweis: {report['note']}")
+    if not report["improved"]:
+        print(f"Keine Verbesserung gefunden ({report['evaluations']} Einstellungen "
+              "probiert) – die Einstellungen bleiben.")
+        return 0
+    name = f"Optimiert {datetime.now():%Y-%m-%d %H:%M}"
+    settings = {**report["settings"], "glossary": report["glossary"]}
+    store.set_default_preset(store.save_preset(name, settings))
+    print(f"„{name}“ gespeichert und als Standard gesetzt "
+          f"({report['evaluations']} Einstellungen probiert, {report['stopped']}).")
     return 0
 
 
@@ -431,6 +531,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--wpe-delay", type=int, default=3,
                    help="WPE: frames kept as direct sound before the prediction starts")
     p.add_argument("--wpe-iterations", type=int, default=3, help="WPE: estimation rounds")
+    p.add_argument("--voice-margin", type=float,
+                   help="with a voice profile: give every sentence to the voice it is "
+                        "clearly closer to (cosine lead, e.g. 0.1); default: off")
     p.add_argument("--speaker-per-sentence", action="store_true",
                    help="one speaker per sentence (no switch inside a sentence)")
     p.add_argument("--steps-dir", help="trial run: write every processing stage's audio and "
@@ -445,6 +548,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
     _add_analysis_args(p)
     p.set_defaults(func=cmd_transcribe)
+
+    p = sub.add_parser("tune", help="find the transcription settings closest to what you "
+                                    "corrected; saved as a preset and made the default")
+    p.add_argument("--window", action="append", required=True, metavar="ID:START-END",
+                   help="a corrected stretch (seconds), e.g. I01:0-300; repeat for more; "
+                        "two or more allow a check on a stretch the search did not see")
+    p.add_argument("--voice", default="interviewer", help="voice profile (if present, "
+                                                          "its use is tuned too)")
+    p.add_argument("--max-evals", type=int, default=40, help="maximum settings to try")
+    p.add_argument("--budget-minutes", type=float, help="stop searching after this time")
+    p.add_argument("--threads", type=int, help="CPU threads (default: all)")
+    p.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_tune)
 
     p = sub.add_parser("analyze", help="re-run question/guide analysis on a transcript JSON "
                                        "(e.g. after editing the guide)")
@@ -473,6 +589,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--save-voice", help="instead: learn this voice profile from --speaker's "
                                         "sentences (a transcript you corrected completely)")
     p.add_argument("--speaker", help="with --save-voice: the speaker label to learn")
+    p.add_argument("--learn-until", type=float,
+                   help="with --save-voice: only the first N seconds were checked")
+    p.add_argument("--replace-voice", action="store_true",
+                   help="with --save-voice: start the profile over instead of refining it")
     p.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_speakers)
 
@@ -526,7 +646,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
     apply_paths(paths)
-    return args.func(args, paths)
+    try:
+        return args.func(args, paths)
+    except ValueError as e:  # wrong input (e.g. an invalid profile name), not a program error
+        print(f"\nERROR: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -58,6 +58,10 @@ class PipelineOptions:
     # (taps, delay, iterations): reduce reverberation with WPE before all models
     dereverb: tuple[int, int, int] | None = None
     sentence_level: bool = False  # one speaker per sentence, see merge.by_sentence
+    # With a voice profile (``analysis.voice``): give every sentence to the voice it is
+    # clearly closer to, see speakers.assign_by_voice. The value is the required lead
+    # (cosine); None: off.
+    voice_margin: float | None = None
     # trial runs: the audio of every processing stage and every step's result, to listen
     # to and compare (see write_steps)
     steps_dir: Path | None = None
@@ -209,6 +213,22 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
             say("diarize", 1.0)
 
     turns = build_turns(segments, diarization, boundaries, opts.sentence_level)
+    voice = opts.analysis.voice
+    voice_report = None
+    if opts.voice_margin is not None and voice and diarization and diarization.embeddings:
+        if voice.get("model_revision") == MODELS[DIARIZATION_MODEL].revision:
+            from interis.analysis.roles import voice_embedder
+            from interis.analysis.speakers import assign_by_voice
+
+            say("voice", 0.0)
+            t0 = time.monotonic()
+            turns, voice_report = assign_by_voice(
+                turns, audio, voice_embedder(verify_ready(paths, DIARIZATION_MODEL)), voice,
+                diarization.embeddings, opts.voice_margin, boundaries)
+            took["voice"] = time.monotonic() - t0
+            say("voice", 1.0)
+        else:
+            voice_report = {"applied": False, "reason": "voice profile of another model"}
     labels = sorted({t.speaker for t in turns if t.speaker is not None})
     speakers = [
         {"label": label, "role": "unknown", "display_name": label,
@@ -235,12 +255,15 @@ def run_pipeline(audio_paths: Path | list[Path], paths: Paths, opts: PipelineOpt
             "min_duration_off": opts.min_duration_off, "vad_threshold": opts.asr.vad,
             "dereverb": list(opts.dereverb) if opts.dereverb else None,
             "speaker_per_sentence": opts.sentence_level,
+            "voice_margin": opts.voice_margin,
             "condition_on_previous_text": False, "vad_filter": True, "language": "de",
         },
         "packages": {p: version(p) for p in _PACKAGES},
         "platform": f"{platform.system()} {platform.release()} / Python "
                     f"{platform.python_version()}",
     }
+    if voice_report is not None:
+        meta["voice_assignment"] = voice_report  # counts only, no embeddings
     transcript = Transcript(meta=meta, speakers=speakers, turns=turns)
     say("analyze", 0.0)
     t0 = time.monotonic()
