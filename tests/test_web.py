@@ -408,3 +408,75 @@ def test_exchange_shows_question_turn_even_if_next_question_is_in_same_turn():
     state = interview_state(t, [], [], parse_guide(GUIDE))
     ex = state["cells"][qs[0]["guide_code"]]["exchanges"][0]
     assert ex["dialogue"], "the question's own turn must be shown"
+
+
+# ------------------------------------------------------------------ timeline: waveform, borders
+
+def test_waveform_overview_is_made_by_a_job_and_then_served(tmp_path):
+    import base64
+
+    import numpy as np
+
+    from interis.pipeline.peaks import RATE, encode, frame_peaks, joint, peaks_file
+    from interis.web.jobs import JobRunner
+
+    paths = Paths(tmp_path)
+    paths.ensure()
+    t = _interview()
+    t.meta.update({"interview_id": "T1", "audio": {"duration_s": 30.0, "sha256": "ab" * 32,
+                                                   "parts": []}})
+    (tmp_path / "exports" / "T1").mkdir(parents=True)
+    (tmp_path / "exports" / "T1" / "T1.json").write_text(json.dumps(t.to_dict()),
+                                                          encoding="utf-8")
+    c = TestClient(create_app(paths, TOKEN, 8765), base_url=BASE)
+    assert c.post("/api/login", json={"token": TOKEN}, headers=H).status_code == 200
+    assert c.get("/api/interviews/T1/peaks").json() == {"status": "missing"}
+    job = c.post("/api/interviews/T1/peaks", headers=H).json()["job"]
+    assert c.post("/api/interviews/T1/peaks", headers=H).json()["job"] == job  # no duplicate
+    assert c.get("/api/interviews/T1/peaks").json() == {"status": "running"}
+    store = Store(tmp_path / "interis.db")
+    cmd = JobRunner(paths, store, lambda _i: None, lambda _i: "").command(store.job(job))
+    assert cmd[cmd.index("peaks"):] == ["peaks", "T1", "--progress-json"]
+    assert store.job(job)["interview_id"] == ""  # blocks no interview
+
+    loud = np.concatenate([np.zeros(16000), 0.8 * np.ones(16000)]).astype(np.float32)
+    out = peaks_file(paths, "ab" * 32)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"rate": RATE, "duration_s": 30.0,
+                               "peaks": encode(joint([(0.0, frame_peaks(loud))], 30.0))}),
+                   encoding="utf-8")
+    store.update_job(job, status="done")
+    r = c.get("/api/interviews/T1/peaks").json()
+    values = np.frombuffer(base64.b64decode(r["peaks"]), dtype=np.uint8)
+    assert r["status"] == "ready" and len(values) == 30 * RATE + 1
+    assert values[:RATE].max() == 0 and values[RATE:2 * RATE].min() > 200  # silence, then loud
+    assert c.get("/api/interviews/NOPE/peaks").status_code == 404
+
+
+def test_a_border_between_two_speakers_moves_in_one_step(client, data_dir):
+    t = json.loads((data_dir.exports / "T1" / "T1.json").read_text(encoding="utf-8"))
+    store = Store(data_dir.root / "interis.db")
+    a, b = t["turns"][0]["speaker"], t["turns"][1]["speaker"]
+    assert a != b
+    last = len(t["turns"][0]["words"]) - 1
+    move = {"changes": [{"turn": 0, "first": last, "last": last, "speaker": b},
+                        {"turn": 1, "first": 0, "last": 1, "speaker": a}]}
+    r = client.post("/api/interviews/T1/speakers/batch", json=move, headers=H)
+    assert r.status_code == 200 and r.json() == {"words": 3}
+    assert {(e["turn"], e["word"], e["speaker"]) for e in store.speaker_edits("T1")} == {
+        (0, last, b), (1, 0, a), (1, 1, a)}
+    words = client.get("/api/interviews/T1").json()["turns"]
+    assert words[0]["words"][last]["sp"] == b and words[1]["words"][0]["sp"] == a
+    # giving the words back to the speaker diarization found removes the corrections
+    back = {"changes": [{"turn": 0, "first": last, "last": last, "speaker": a},
+                        {"turn": 1, "first": 0, "last": 1, "speaker": b}]}
+    assert client.post("/api/interviews/T1/speakers/batch", json=back, headers=H).status_code == 200
+    assert store.speaker_edits("T1") == []
+    # one bad range: nothing at all is saved
+    bad = {"changes": [{"turn": 0, "first": last, "last": last, "speaker": b},
+                       {"turn": 1, "first": 0, "last": 9999, "speaker": a}]}
+    assert client.post("/api/interviews/T1/speakers/batch", json=bad, headers=H).status_code == 422
+    assert store.speaker_edits("T1") == []
+    unknown = {"changes": [{"turn": 0, "first": 0, "last": 0, "speaker": "NOBODY"}]}
+    assert client.post("/api/interviews/T1/speakers/batch", json=unknown,
+                       headers=H).status_code == 422

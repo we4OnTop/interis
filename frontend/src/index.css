@@ -115,6 +115,11 @@
   text-decoration: underline dotted var(--suggest);
   text-underline-offset: 3px;
 }
+/* words a dragged border on the time track would give to the other speaker */
+.drag-moved {
+  background: color-mix(in oklab, var(--primary) 28%, transparent);
+  outline: 1px solid var(--primary);
+}
 .turn-playing {
   background: var(--question-soft);
 }

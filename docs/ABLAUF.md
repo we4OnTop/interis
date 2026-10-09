@@ -96,6 +96,24 @@ Sprecher wechselt, steht sein Name im Text. Ein Abschnitt zählt für den Sprech
 meisten seiner Wörter sagt; ein Satz ebenso. Bei „Änderungen anzeigen“ sind geänderte Wörter
 gestrichelt umrandet.
 
+**Zeitspur beim Korrigieren.** Im Modus „Korrigieren“ steht rechts neben dem Text eine senkrechte
+Zeitspur (Zeit läuft nach unten). Jeder **Block** – was eine Person sagt, bis die andere spricht –
+ist ein Balken in der Spur seines Sprechers (links Interviewer, rechts Befragte:r), hinterlegt mit
+der **Wellenform** der Aufnahme: so siehst du, wo wirklich gesprochen wird. Die Wellenform wird beim
+ersten Öffnen im Hintergrund berechnet (einmal je Gespräch, danach gespeichert). Blöcke, die sich
+zeitlich überlappen, teilen sich ihre Spur nebeneinander.
+
+- **Abspielen:** Block anklicken spielt ihn ab und springt im Text dorthin; ein Klick in die freie
+  Spur spielt ab dort. Die rote Linie ist die Wiedergabe, die Spur folgt ihr. Der Regler „grob – fein“
+  ändert den Maßstab; die Spur folgt auch dem Text, wenn du ihn scrollst.
+- **Grenze verschieben:** Den Block wählen, dann die Linie „Anfang“ oder „Ende“ ziehen: Die
+  Wörter dazwischen gehen an den anderen Sprecher (im Text sofort markiert, „3 Wörter wechseln“).
+  Sprecher werden je Wort gespeichert, deshalb rastet die Grenze zwischen zwei Wörtern ein.
+  Genauer geht es mit den Pfeiltasten „Anfang“/„Ende“: ein Wort früher oder später. Nach jeder
+  Änderung spielt Interis zur **Hörprobe** zwei Sekunden um die neue Grenze.
+- Gespeichert wird als Sprecherkorrektur (wie beim Markieren von Wörtern); die Analyse zeigt danach
+  „veraltet“, bis du „Analyse aktualisieren“ wählst.
+
 **Sprecher nach Stimme:** Ist die Sprechertrennung schlecht, die erste Minute (oder mehr)
 wie oben richtigstellen und „Sprecher nach Stimme …“ wählen. Ein Hintergrundauftrag lernt aus
 diesem Anfang die Stimmen (Stimmabdruck je Satz mit dem Modell der Sprechertrennung) und gibt

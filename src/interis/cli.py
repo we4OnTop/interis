@@ -481,6 +481,42 @@ def cmd_tune(args: argparse.Namespace, paths: Paths) -> int:
     return 0
 
 
+def cmd_peaks(args: argparse.Namespace, paths: Paths) -> int:
+    """Waveform overview of an interview's recordings (for the timeline in the website)."""
+    import numpy as np
+
+    from interis.pipeline.peaks import RATE, encode, frame_peaks, joint, peaks_file
+    from interis.pipeline.run import decode
+    from interis.pipeline.types import Transcript
+    from interis.web.store import Store
+
+    iid = args.interview
+    src = paths.exports / iid / f"{iid}.json"
+    if not src.is_file():
+        print(f"ERROR: {iid}: no transcript", file=sys.stderr)
+        return 1
+    raw = Transcript.from_dict(json.loads(src.read_text(encoding="utf-8")))
+    files = Store(paths.root / "interis.db").part_paths(iid)
+    if not files or len(files) != len(raw.parts) or not all(f.is_file() for f in files):
+        print(f"ERROR: {iid}: recordings missing", file=sys.stderr)
+        return 1
+    progress = _progress_json() if args.progress_json else _progress_printer()
+    parts: list[tuple[float, np.ndarray]] = []
+    for n, (f, p) in enumerate(zip(files, raw.parts, strict=True)):
+        progress("peaks", n / len(files))
+        parts.append((float(p["offset_s"]), frame_peaks(decode(f))))
+    duration = float(raw.meta["audio"]["duration_s"])
+    out = peaks_file(paths, raw.meta["audio"]["sha256"])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"rate": RATE, "duration_s": duration,
+                               "peaks": encode(joint(parts, duration))}), encoding="utf-8")
+    tmp.replace(out)
+    progress("peaks", 1.0)
+    print(f"Waveform of {iid} saved")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     from interis.models import ASR_MODELS, MODELS
 
@@ -560,6 +596,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--threads", type=int, help="CPU threads (default: all)")
     p.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_tune)
+
+    p = sub.add_parser("peaks", help="waveform overview of an interview's recordings (for "
+                                     "the timeline in the website)")
+    p.add_argument("interview", help="interview ID, e.g. I01")
+    p.add_argument("--progress-json", action="store_true", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_peaks)
 
     p = sub.add_parser("analyze", help="re-run question/guide analysis on a transcript JSON "
                                        "(e.g. after editing the guide)")

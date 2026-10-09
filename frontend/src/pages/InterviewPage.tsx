@@ -28,6 +28,7 @@ import { useFeedback } from "@/lib/feedback";
 import { clock, partAt, STATUS_LABEL, stamp, tagText } from "@/lib/format";
 import { usePlayer, usePlayerState } from "@/lib/player";
 import { useProject } from "@/lib/project";
+import { TimeRail, RAIL_WIDTH } from "@/components/TimeRail";
 import { ReviewProvider, useReview, type Span } from "@/lib/review";
 import { href } from "@/lib/router";
 import { cn } from "@/lib/utils";
@@ -416,7 +417,17 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
         </div>
       </div>
 
-      <aside className="sticky top-20 hidden h-[calc(100vh-7rem)] w-72 shrink-0 overflow-y-auto lg:block">
+      {mode === "correct" && (
+        <aside className="sticky top-20 hidden h-[calc(100vh-10.5rem)] shrink-0 lg:block" style={{ width: RAIL_WIDTH }}>
+          <TimeRail
+            d={d}
+            onChanged={onChanged}
+            play={(start, end) => player.play(source(d.id), start, end)}
+            scrollText={(ti) => document.getElementById(`t-${ti}`)?.scrollIntoView({ block: "center", behavior: "smooth" })}
+          />
+        </aside>
+      )}
+      <aside className={cn("sticky top-20 hidden h-[calc(100vh-7rem)] w-72 shrink-0 overflow-y-auto", mode === "correct" ? "xl:hidden" : "lg:block")}>
         <Card className="gap-3 py-4">
           <CardHeader>
             <CardTitle className="text-sm">Leitfaden in diesem Gespräch</CardTitle>

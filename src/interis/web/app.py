@@ -45,6 +45,7 @@ from interis.analysis.guide import (
 from interis.config import Paths
 from interis.models import ASR_MODELS
 from interis.pipeline.cache import combined_sha
+from interis.pipeline.peaks import peaks_file
 from interis.pipeline.types import Transcript
 from interis.web import extracts as export
 from interis.web.base import secure_app
@@ -176,6 +177,10 @@ class ReferenceRequest(BaseModel):
     margin: float = Field(default=0.1, ge=0.0, le=0.5)
     min_seconds: float = Field(default=1.0, ge=0.3, le=5.0)
     use_voice: bool = False  # the interviewer's voice profile (then no reference needed)
+
+
+class SpeakerBatch(BaseModel):
+    changes: list[SpeakerUpdate] = Field(min_length=1, max_length=200)
 
 
 class VoiceLearn(BaseModel):
@@ -864,6 +869,29 @@ def create_app(paths: Paths, login_token: str, port: int,
             store.set_speakers(interview, body.turn, change)
         return {"ok": True}
 
+    @app.post("/api/interviews/{interview}/speakers/batch")
+    def set_speakers_batch(interview: str, body: SpeakerBatch) -> dict[str, int]:
+        """Several word ranges given to speakers in one step (moving the border between two
+        speakers' blocks touches words of more than one turn); all or nothing."""
+        _interview_in_project(interview)
+        t = _transcript(interview)
+        labels = {s["label"] for s in t.speakers}
+        per_turn: dict[int, dict[int, str | None]] = {}
+        for c in body.changes:
+            _check_span(t, c, c.last)
+            if c.speaker is not None and c.speaker not in labels:
+                raise HTTPException(422, "unknown speaker")
+            turn = t.turns[c.turn]
+            for w in range(c.first, c.last + 1):
+                found = turn.words[w].speaker or turn.speaker  # what diarization gave the word
+                per_turn.setdefault(c.turn, {})[w] = (
+                    None if c.speaker in (None, found) else c.speaker)
+        with write_lock:
+            _not_transcribing(interview)
+            for turn, change in per_turn.items():
+                store.set_speakers(interview, turn, change)
+        return {"words": sum(len(c) for c in per_turn.values())}
+
     @app.post("/api/interviews/{interview}/speakers/reference")
     def speakers_by_reference(interview: str, body: ReferenceRequest) -> dict[str, int]:
         """Assign the speakers after the reference stretch by voice (a background job; see
@@ -1001,6 +1029,30 @@ def create_app(paths: Paths, login_token: str, port: int,
             _not_transcribing(extract["interview_id"])
             store.delete_extract(extract_id)
         return {"ok": True}
+
+    def _peaks_job(interview: str) -> dict[str, Any] | None:
+        return next((j for j in reversed(store.jobs()) if j["kind"] == "peaks"
+                     and j["options"].get("interview") == interview
+                     and j["status"] in ("queued", "running")), None)
+
+    @app.get("/api/interviews/{interview}/peaks")
+    def peaks(interview: str) -> dict[str, Any]:
+        """Waveform overview (one byte per 50 ms, base64) for the timeline, or why not yet."""
+        t = _transcript(interview)
+        out = peaks_file(paths, t.meta["audio"]["sha256"])
+        if out.is_file():
+            return {"status": "ready", **json.loads(out.read_text(encoding="utf-8"))}
+        return {"status": "running" if _peaks_job(interview) else "missing"}
+
+    @app.post("/api/interviews/{interview}/peaks")
+    def make_peaks(interview: str) -> dict[str, Any]:
+        _interview_in_project(interview)
+        _transcript(interview)
+        job = _peaks_job(interview)
+        if job is None:
+            job = {"id": store.add_job("peaks", "", {"interview": interview})}
+            runner.notify()
+        return {"job": job["id"]}
 
     @app.get("/api/interviews/{interview}/audio")
     def audio(interview: str) -> FileResponse:

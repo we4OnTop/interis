@@ -140,6 +140,8 @@ class JobRunner:
         options = job["options"]
         if job["kind"] == "trial":  # an excerpt with other settings; touches no interview
             iid = str(options["interview"])
+        if job["kind"] == "peaks":  # the waveform of one interview's recording
+            return [*base, "peaks", str(options["interview"]), "--progress-json"]
         if job["kind"] == "tune":  # settings search on corrected stretches; touches no interview
             cmd = [*base, "tune", "--progress-json"]
             for w in options["windows"]:
