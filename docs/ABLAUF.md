@@ -125,15 +125,17 @@ wenigsten nach dir klingen. Das Ergebnis steht direkt im Transkript, ohne dass d
 nach Stimme“ von Hand startest. Es braucht ein Stimmprofil und gilt für Gespräche zu zweit.
 
 **Einstellungen automatisch optimieren.** Auf der Seite „Transkription“ (Karte „Automatisch
-optimieren“) wählst du ein oder mehrere Ausschnitte (je 1–15 Minuten), die du korrigiert
-hast – oder ein Gespräch mit gesetztem „Korrektur abgeschlossen“. „Aus Korrekturen vorschlagen“
-nimmt den Bereich vom ersten bis zum letzten korrigierten Redebeitrag (höchstens 10 Minuten),
-bei gesetztem „Korrektur abgeschlossen“ ohne Korrekturen den Anfang. Die Ränder rasten immer auf
-ganze Redebeiträge des korrigierten Transkripts ein: Der Anfang rückt zum Beginn des
-Redebeitrags, das Ende zu dessen Ende, damit die Aufnahme nie mitten im Satz beginnt oder
-endet. Zu kurze Ausschnitte wachsen um ganze Redebeiträge, zu lange verlieren welche am Ende.
-Unter jeder Zeile steht, was der Ausschnitt enthält (Zeiten, Redebeiträge, Wörter, Wort- und
-Sprecherkorrekturen sowie Anfang und Ende des Textes); genau dieser Ausschnitt wird verwendet. Dein korrigierter Text
+optimieren“) wählst du pro Gespräch einen Ausschnitt von 1–15 Minuten, den du korrigiert
+hast – oder ein Gespräch mit gesetztem „Korrektur abgeschlossen“. „Ausschnitt im Transkript
+wählen …“ öffnet ein Fenster mit dem korrigierten Transkript, **Block für Block** (ein Block ist
+das, was eine Person sagt, bis die andere spricht): erst den ersten, dann den letzten Block
+anklicken. Korrigierte Blöcke sind markiert, „Aus Korrekturen vorschlagen“ wählt den Bereich vom
+ersten bis zum letzten korrigierten Block (höchstens 10 Minuten; bei gesetztem „Korrektur
+abgeschlossen“ ohne Korrekturen den Anfang). So beginnt und endet die Aufnahme immer an einer
+Blockgrenze, nie mitten im Satz. Ein zu kurzer Ausschnitt wächst um die folgenden Blöcke, ein zu
+langer verliert Blöcke am Ende. Unter der Zeile steht danach, was der Ausschnitt enthält (Zeiten,
+Blöcke, Wörter, Wort- und Sprecherkorrekturen, Anfang und Ende des Textes); genau dieser
+Ausschnitt wird verwendet. Dein korrigierter Text
 (Wortkorrekturen und Sprecherkorrekturen) ist der Maßstab. Interis transkribiert die
 Ausschnitte mit verschiedenen Einstellungen neu und misst
 

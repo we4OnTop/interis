@@ -260,6 +260,28 @@ def add_transcription_routes(app: FastAPI, paths: Paths, store, runner,
         except TuneError as e:
             raise HTTPException(422, f"{iid}: {e}") from e
 
+    @app.get("/api/tuning/turns")
+    def turns_for_picker(interview: str) -> dict[str, Any]:
+        """The corrected transcript block by block (a block = one turn of a speaker, up to
+        the next change of speaker), to pick the stretch to measure against."""
+        t = _effective(interview)
+        names = {sp["label"]: sp.get("display_name") or sp["label"] for sp in t.speakers}
+        corrected = ({e["turn"] for e in store.word_edits(interview)
+                      if e["kind"] == "correction"}
+                     | {e["turn"] for e in store.speaker_edits(interview)})
+        out = []
+        for i, turn in enumerate(t.turns):
+            words = [w for w in turn.words if w.text.strip()]
+            if not words:
+                continue
+            text = "".join(w.text for w in words).strip()
+            out.append({"i": i, "speaker": turn.speaker, "start": turn.start, "end": turn.end,
+                        "words": len(words), "corrected": i in corrected,
+                        "text": text if len(text) <= 700 else text[:700] + " …"})
+        return {"speakers": [{"label": sp["label"], "name": names[sp["label"]],
+                              "role": sp.get("role", "unknown")} for sp in t.speakers],
+                "turns": out, "reviewed": store.reviewed(interview)}
+
     @app.post("/api/tuning/preview")
     def preview_window(body: TuneWindow) -> dict[str, Any]:
         """The stretch with its edges moved to whole speaker turns, and what it contains."""

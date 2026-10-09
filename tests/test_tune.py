@@ -267,3 +267,16 @@ def test_website_shows_what_a_stretch_contains_and_suggests_one(interview):
     sug = c.get("/api/tuning/suggest?interview=I01").json()
     assert sug["start"] == t.turns[2].start and sug["end"] >= t.turns[6].end
     assert sug["corrections"] == 2 and sug["speaker_corrections"] == 0
+
+
+def test_website_lists_the_blocks_to_pick_from(interview):
+    _paths, c, store = interview
+    store.set_word_edits("I01", [{"turn": 2, "word": 1, "kind": "correction", "tag": "",
+                                  "action": "replace", "text": "x"}])
+    r = c.get("/api/tuning/turns?interview=I01").json()
+    t = _transcript(reps=20)
+    assert len(r["turns"]) == len(t.turns) and r["turns"][0]["start"] == 0.0
+    assert [x["i"] for x in r["turns"] if x["corrected"]] == [2]
+    assert r["turns"][2]["text"].split()[1] == "x"  # the corrected text, not the machine's
+    assert {s["label"] for s in r["speakers"]} == {"A", "B"} and r["reviewed"] is False
+    assert c.get("/api/tuning/turns?interview=NOPE").status_code in (404, 422)

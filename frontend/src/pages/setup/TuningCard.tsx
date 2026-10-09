@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { LoaderIcon, PlusIcon, SparklesIcon, WandSparklesIcon, XIcon } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { ListChecksIcon, LoaderIcon, PlusIcon, WandSparklesIcon, XIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,15 +12,9 @@ import { api, type ErrorRates, type TuneReport, type TuningState } from "@/lib/a
 import { useFeedback } from "@/lib/feedback";
 import { clock, STAGE_LABEL } from "@/lib/format";
 import { useProject } from "@/lib/project";
+import { TurnPicker } from "@/pages/setup/TurnPicker";
 
 const pct = (x: number) => `${(x * 100).toFixed(1).replace(".", ",")} %`;
-
-/** "5:00", "1:05:00" or "300" → seconds; null if invalid. */
-function clockToSeconds(text: string): number | null {
-  const parts = text.trim().split(":");
-  if (parts.length > 3 || parts.some((p) => !/^\d+$/.test(p))) return null;
-  return parts.reduce((acc, p) => acc * 60 + Number(p), 0);
-}
 
 const SETTING_LABEL: Record<string, string> = {
   sentence_level: "Sprecher pro Satz",
@@ -55,13 +49,13 @@ interface Stretch {
 
 interface Row {
   interview: string;
-  from: string;
-  to: string;
+  /** the picked stretch in seconds (before the edges are moved to whole blocks) */
+  pick: { start: number; end: number } | null;
   stretch: Stretch | null;
   error: string | null;
 }
 
-const newRow = (interview: string): Row => ({ interview, from: "0:00", to: "5:00", stretch: null, error: null });
+const newRow = (interview: string): Row => ({ interview, pick: null, stretch: null, error: null });
 
 export function TuningCard() {
   const { detail } = useProject();
@@ -93,41 +87,13 @@ export function TuningCard() {
   }, [running, load]);
 
   const update = (i: number, patch: Partial<Row>) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const [picking, setPicking] = useState<number | null>(null);
 
-  // what the typed times really cover: the edges move to whole speaker turns
-  const typed = rows.map((r) => `${r.interview}|${r.from}|${r.to}`).join(";");
-  const checked = useRef<Record<number, string>>({});
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      rows.forEach((r, i) => {
-        const from = clockToSeconds(r.from);
-        const to = clockToSeconds(r.to);
-        const key = `${r.interview}|${r.from}|${r.to}`;
-        if (checked.current[i] === key) return;
-        checked.current[i] = key;
-        if (!r.interview || from === null || to === null || to <= from) {
-          update(i, { stretch: null, error: "Zeiten als min:s angeben, „bis“ nach „ab“." });
-          return;
-        }
-        api<Stretch>("POST", "/api/tuning/preview", { interview: r.interview, start: from, end: to })
-          .then((st) => checked.current[i] === key && update(i, { stretch: st, error: null }))
-          .catch((e: Error) => checked.current[i] === key && update(i, { stretch: null, error: e.message }));
-      });
-    }, 400);
-    return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [typed]);
-
-  const suggest = async (i: number) => {
-    try {
-      const st = await api<Stretch>("GET", `/api/tuning/suggest?interview=${encodeURIComponent(rows[i].interview)}`);
-      const from = clock(st.start);
-      const to = clock(st.end);
-      checked.current[i] = `${rows[i].interview}|${from}|${to}`; // already checked: no second request
-      update(i, { from, to, stretch: st, error: null });
-    } catch (e) {
-      fail(e);
-    }
+  const pick = (i: number, start: number, end: number) => {
+    update(i, { pick: { start, end }, stretch: null, error: null });
+    api<Stretch>("POST", "/api/tuning/preview", { interview: rows[i].interview, start, end })
+      .then((st) => update(i, { stretch: st }))
+      .catch((e: Error) => update(i, { error: e.message }));
   };
 
   const windows = rows.map((r) => r.stretch);
@@ -154,8 +120,8 @@ export function TuningCard() {
           Dein korrigierter Text dient als Maßstab. Interis transkribiert die gewählten Ausschnitte mit verschiedenen Einstellungen neu (Hall,
           Raummikrofon, Sprecher pro Satz, Stimme, Beam, Genauigkeit, gelernte Begriffe …), misst falsche Wörter und falsch zugeordnete Sprecher
           und behält die beste Kombination. Sie wird als Einstellung „Optimiert …“ gespeichert und zum Standard. Wähle Ausschnitte, die du
-          vollständig korrigiert hast (oder „Korrektur abgeschlossen“ gesetzt). Die Ränder rasten auf ganze Redebeiträge des korrigierten Transkripts
-          ein, damit die Aufnahme nie mitten im Satz beginnt oder endet; darunter siehst du, was der Ausschnitt enthält. Mit zwei oder mehr
+          vollständig korrigiert hast (oder „Korrektur abgeschlossen“ gesetzt). Den Ausschnitt wählst du in einem Fenster mit dem korrigierten Transkript,
+          Block für Block (ein Block endet, wenn die andere Person spricht); so beginnt und endet die Aufnahme nie mitten im Satz. Mit zwei oder mehr
           Ausschnitten wird das Ergebnis an einem geprüft, den die Suche nicht gesehen hat.
         </CardDescription>
       </CardHeader>
@@ -170,7 +136,7 @@ export function TuningCard() {
                   <div className="flex flex-wrap items-end gap-3">
                     <div className="grid gap-1.5">
                       <Label>Gespräch</Label>
-                      <Select value={r.interview} onValueChange={(v) => update(i, { interview: v })} disabled={running}>
+                      <Select value={r.interview} onValueChange={(v) => update(i, { ...newRow(v) })} disabled={running}>
                         <SelectTrigger className="w-32">
                           <SelectValue />
                         </SelectTrigger>
@@ -183,17 +149,9 @@ export function TuningCard() {
                         </SelectContent>
                       </Select>
                     </div>
-                    <div className="grid gap-1.5">
-                      <Label>von (min:s)</Label>
-                      <Input className="w-24" value={r.from} disabled={running} onChange={(e) => update(i, { from: e.target.value })} />
-                    </div>
-                    <div className="grid gap-1.5">
-                      <Label>bis (min:s)</Label>
-                      <Input className="w-24" value={r.to} disabled={running} onChange={(e) => update(i, { to: e.target.value })} />
-                    </div>
-                    <Button variant="outline" size="sm" disabled={running || !r.interview} onClick={() => void suggest(i)} title="Vom ersten bis zum letzten korrigierten Redebeitrag">
-                      <SparklesIcon />
-                      Aus Korrekturen vorschlagen
+                    <Button variant="outline" disabled={running || !r.interview} onClick={() => setPicking(i)}>
+                      <ListChecksIcon />
+                      {r.stretch ? "Ausschnitt ändern …" : "Ausschnitt im Transkript wählen …"}
                     </Button>
                     {rows.length > 1 && !running && (
                       <Button variant="ghost" size="icon-xs" title="entfernen" onClick={() => setRows(rows.filter((_, j) => j !== i))}>
@@ -211,6 +169,15 @@ export function TuningCard() {
                 </Button>
               )}
             </div>
+            {picking !== null && (
+              <TurnPicker
+                open
+                interview={rows[picking].interview}
+                current={rows[picking].stretch}
+                onOpenChange={(o) => !o && setPicking(null)}
+                onPick={(a, b) => pick(picking, a, b)}
+              />
+            )}
             <div className="flex flex-wrap items-end gap-4">
               <div className="grid gap-1.5">
                 <Label htmlFor="tbudget">Höchstens (Minuten)</Label>
@@ -245,6 +212,7 @@ export function TuningCard() {
 function StretchInfo({ row }: { row: Row }) {
   const st = row.stretch;
   if (row.error) return <p className="text-destructive text-xs">{row.error}</p>;
+  if (!row.pick) return <p className="text-muted-foreground text-xs">Noch kein Ausschnitt gewählt.</p>;
   if (!st) return <LoaderIcon className="text-muted-foreground size-4 animate-spin" />;
   const unchecked = st.corrections + st.speaker_corrections === 0 && !st.reviewed;
   return (
@@ -254,7 +222,7 @@ function StretchInfo({ row }: { row: Row }) {
           {clock(st.start)} – {clock(st.end)}
         </b>{" "}
         <span className="text-muted-foreground">
-          (Ränder auf ganze Redebeiträge gelegt) · {st.turns} Redebeiträge · {st.words} Wörter ·{" "}
+          · {st.turns} Blöcke · {st.words} Wörter ·{" "}
           {st.corrections} Wortkorrekturen · {st.speaker_corrections} Sprecherkorrekturen{st.reviewed ? " · Korrektur abgeschlossen" : ""}
         </span>
       </p>
