@@ -88,6 +88,7 @@ export function buildBlocks(d: InterviewDetail): Block[] {
       // a paragraph you inserted is a block of its own: it neither joins the words before it nor takes the ones after
       if (last && last.who === who && last.ins === turn.ins) {
         last.words.push(word);
+        last.start = Math.min(last.start, w.s); // word times of neighbouring segments can overlap a little
         last.end = Math.max(last.end, w.e);
       } else {
         const sp = names.get(who);
