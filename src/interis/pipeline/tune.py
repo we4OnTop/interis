@@ -43,6 +43,8 @@ from interis.pipeline.types import Transcript
 
 MIN_GAIN = 0.002  # smaller differences are noise (a few words), not an improvement
 MIN_WINDOW_S = 60.0
+MAX_WINDOW_S = 900.0
+SUGGEST_S = 600.0
 MAX_HOTWORDS_CHARS = 800
 
 # Searched settings (keys of the website's transcription settings plus "glossary"), cheap
@@ -82,6 +84,55 @@ class Window:
     @property
     def name(self) -> str:
         return f"{self.interview} {int(self.start // 60)}:{int(self.start % 60):02d}"
+
+
+@dataclass
+class Span:
+    """A stretch of whole speaker turns of the corrected transcript."""
+
+    start: float
+    end: float
+    first: int  # first and last turn (index in ``Transcript.turns``)
+    last: int
+
+
+def snap_to_turns(t: Transcript, start: float, end: float, min_len: float = MIN_WINDOW_S,
+                  max_len: float = MAX_WINDOW_S) -> Span:
+    """Move the edges of ``start``..``end`` to the edges of the speaker turns they fall in,
+    so the recording is never cut in the middle of what somebody says: the start moves back
+    to the beginning of the turn, the end forward to the end of its turn. A stretch that gets
+    too long loses turns at its end, one that is too short gains turns."""
+    turns = [(i, x) for i, x in enumerate(t.turns) if x.words]
+    first = next((n for n, (_, x) in enumerate(turns) if x.end > start), None)
+    if first is None:
+        raise TuneError("the stretch lies behind the end of the transcript")
+    last = max((n for n, (_, x) in enumerate(turns) if x.start < end), default=first)
+    last = max(last, first)
+    while last > first and turns[last][1].end - turns[first][1].start > max_len:
+        last -= 1
+    while last < len(turns) - 1 and turns[last][1].end - turns[first][1].start < min_len:
+        last += 1
+    a, b = turns[first][1].start, turns[last][1].end
+    if b - a < min_len:
+        raise TuneError(f"the stretch is shorter than {min_len:.0f} s")
+    if b - a > max_len:
+        raise TuneError(f"one speaker turn is longer than {max_len / 60:.0f} minutes")
+    return Span(a, b, turns[first][0], turns[last][0])
+
+
+def suggest_span(t: Transcript, corrected_turns: list[int], reviewed: bool,
+                 max_len: float = SUGGEST_S) -> Span | None:
+    """Where the corrected text is: from the first to the last turn with a correction (at
+    most ``max_len`` seconds), or, if the whole transcript was checked, its start."""
+    if corrected_turns:
+        a = t.turns[min(corrected_turns)].start
+        b = t.turns[min(max(corrected_turns), len(t.turns) - 1)].end
+    elif reviewed and t.turns:
+        a = t.turns[0].start
+        b = a + max_len
+    else:
+        return None
+    return snap_to_turns(t, a, min(b, a + max_len))
 
 
 Runner = Callable[[dict[str, Any], Window, str | None], Transcript]

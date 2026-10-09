@@ -125,8 +125,15 @@ wenigsten nach dir klingen. Das Ergebnis steht direkt im Transkript, ohne dass d
 nach Stimme“ von Hand startest. Es braucht ein Stimmprofil und gilt für Gespräche zu zweit.
 
 **Einstellungen automatisch optimieren.** Auf der Seite „Transkription“ (Karte „Automatisch
-optimieren“) wählst du ein oder mehrere Ausschnitte (je 3–15 Minuten), die du korrigiert
-hast – oder ein Gespräch mit gesetztem „Korrektur abgeschlossen“. Dein korrigierter Text
+optimieren“) wählst du ein oder mehrere Ausschnitte (je 1–15 Minuten), die du korrigiert
+hast – oder ein Gespräch mit gesetztem „Korrektur abgeschlossen“. „Aus Korrekturen vorschlagen“
+nimmt den Bereich vom ersten bis zum letzten korrigierten Redebeitrag (höchstens 10 Minuten),
+bei gesetztem „Korrektur abgeschlossen“ ohne Korrekturen den Anfang. Die Ränder rasten immer auf
+ganze Redebeiträge des korrigierten Transkripts ein: Der Anfang rückt zum Beginn des
+Redebeitrags, das Ende zu dessen Ende, damit die Aufnahme nie mitten im Satz beginnt oder
+endet. Zu kurze Ausschnitte wachsen um ganze Redebeiträge, zu lange verlieren welche am Ende.
+Unter jeder Zeile steht, was der Ausschnitt enthält (Zeiten, Redebeiträge, Wörter, Wort- und
+Sprecherkorrekturen sowie Anfang und Ende des Textes); genau dieser Ausschnitt wird verwendet. Dein korrigierter Text
 (Wortkorrekturen und Sprecherkorrekturen) ist der Maßstab. Interis transkribiert die
 Ausschnitte mit verschiedenen Einstellungen neu und misst
 

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { PlusIcon, WandSparklesIcon, XIcon } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { LoaderIcon, PlusIcon, SparklesIcon, WandSparklesIcon, XIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,7 @@ import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { api, type ErrorRates, type TuneReport, type TuningState } from "@/lib/api";
 import { useFeedback } from "@/lib/feedback";
-import { STAGE_LABEL } from "@/lib/format";
+import { clock, STAGE_LABEL } from "@/lib/format";
 import { useProject } from "@/lib/project";
 
 const pct = (x: number) => `${(x * 100).toFixed(1).replace(".", ",")} %`;
@@ -39,17 +39,35 @@ function show(value: unknown): string {
   return value === null ? "automatisch" : String(value);
 }
 
+/** A stretch with its edges moved to whole speaker turns, and what it contains. */
+interface Stretch {
+  interview: string;
+  start: number;
+  end: number;
+  turns: number;
+  words: number;
+  corrections: number;
+  speaker_corrections: number;
+  reviewed: boolean;
+  begins: string;
+  ends: string;
+}
+
 interface Row {
   interview: string;
   from: string;
-  minutes: string;
+  to: string;
+  stretch: Stretch | null;
+  error: string | null;
 }
+
+const newRow = (interview: string): Row => ({ interview, from: "0:00", to: "5:00", stretch: null, error: null });
 
 export function TuningCard() {
   const { detail } = useProject();
   const { notify, fail } = useFeedback();
   const ready = detail!.interviews.filter((i) => i.transcribed && i.has_audio).map((i) => i.id);
-  const [rows, setRows] = useState<Row[]>([{ interview: ready[0] ?? "", from: "0:00", minutes: "5" }]);
+  const [rows, setRows] = useState<Row[]>([newRow(ready[0] ?? "")]);
   const [budget, setBudget] = useState("60");
   const [state, setState] = useState<TuningState | null>(null);
 
@@ -74,17 +92,53 @@ export function TuningCard() {
     return () => clearInterval(t);
   }, [running, load]);
 
-  const windows = rows.map((r) => {
-    const from = clockToSeconds(r.from);
-    return from === null || !r.interview ? null : { interview: r.interview, start: from, end: from + Number(r.minutes) * 60 };
-  });
-  const valid = windows.every((w) => w !== null);
-
   const update = (i: number, patch: Partial<Row>) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+
+  // what the typed times really cover: the edges move to whole speaker turns
+  const typed = rows.map((r) => `${r.interview}|${r.from}|${r.to}`).join(";");
+  const checked = useRef<Record<number, string>>({});
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      rows.forEach((r, i) => {
+        const from = clockToSeconds(r.from);
+        const to = clockToSeconds(r.to);
+        const key = `${r.interview}|${r.from}|${r.to}`;
+        if (checked.current[i] === key) return;
+        checked.current[i] = key;
+        if (!r.interview || from === null || to === null || to <= from) {
+          update(i, { stretch: null, error: "Zeiten als min:s angeben, „bis“ nach „ab“." });
+          return;
+        }
+        api<Stretch>("POST", "/api/tuning/preview", { interview: r.interview, start: from, end: to })
+          .then((st) => checked.current[i] === key && update(i, { stretch: st, error: null }))
+          .catch((e: Error) => checked.current[i] === key && update(i, { stretch: null, error: e.message }));
+      });
+    }, 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [typed]);
+
+  const suggest = async (i: number) => {
+    try {
+      const st = await api<Stretch>("GET", `/api/tuning/suggest?interview=${encodeURIComponent(rows[i].interview)}`);
+      const from = clock(st.start);
+      const to = clock(st.end);
+      checked.current[i] = `${rows[i].interview}|${from}|${to}`; // already checked: no second request
+      update(i, { from, to, stretch: st, error: null });
+    } catch (e) {
+      fail(e);
+    }
+  };
+
+  const windows = rows.map((r) => r.stretch);
+  const valid = windows.every((w) => w !== null);
 
   const start = async () => {
     try {
-      await api("POST", "/api/tuning", { windows, budget_minutes: Number(budget) || null });
+      await api("POST", "/api/tuning", {
+        windows: windows.map((w) => ({ interview: w!.interview, start: w!.start, end: w!.end })),
+        budget_minutes: Number(budget) || null,
+      });
       notify("Optimierung gestartet");
     } catch (e) {
       fail(e);
@@ -100,8 +154,9 @@ export function TuningCard() {
           Dein korrigierter Text dient als Maßstab. Interis transkribiert die gewählten Ausschnitte mit verschiedenen Einstellungen neu (Hall,
           Raummikrofon, Sprecher pro Satz, Stimme, Beam, Genauigkeit, gelernte Begriffe …), misst falsche Wörter und falsch zugeordnete Sprecher
           und behält die beste Kombination. Sie wird als Einstellung „Optimiert …“ gespeichert und zum Standard. Wähle Ausschnitte, die du
-          vollständig korrigiert hast (oder „Korrektur abgeschlossen“ gesetzt); mit zwei oder mehr wird das Ergebnis an einem Ausschnitt geprüft, den
-          die Suche nicht gesehen hat.
+          vollständig korrigiert hast (oder „Korrektur abgeschlossen“ gesetzt). Die Ränder rasten auf ganze Redebeiträge des korrigierten Transkripts
+          ein, damit die Aufnahme nie mitten im Satz beginnt oder endet; darunter siehst du, was der Ausschnitt enthält. Mit zwei oder mehr
+          Ausschnitten wird das Ergebnis an einem geprüft, den die Suche nicht gesehen hat.
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -109,52 +164,48 @@ export function TuningCard() {
           <p className="text-muted-foreground text-sm">Erst ein Gespräch mit Aufnahme transkribieren und korrigieren.</p>
         ) : (
           <>
-            <div className="grid gap-2">
+            <div className="grid gap-3">
               {rows.map((r, i) => (
-                <div key={i} className="flex flex-wrap items-end gap-3">
-                  <div className="grid gap-1.5">
-                    {i === 0 && <Label>Gespräch</Label>}
-                    <Select value={r.interview} onValueChange={(v) => update(i, { interview: v })} disabled={running}>
-                      <SelectTrigger className="w-32">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {ready.map((id) => (
-                          <SelectItem key={id} value={id}>
-                            {id}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="grid gap-1.5">
-                    {i === 0 && <Label>ab (min:s)</Label>}
-                    <Input className="w-24" value={r.from} disabled={running} onChange={(e) => update(i, { from: e.target.value })} aria-invalid={clockToSeconds(r.from) === null} />
-                  </div>
-                  <div className="grid gap-1.5">
-                    {i === 0 && <Label>Länge</Label>}
-                    <Select value={r.minutes} onValueChange={(v) => update(i, { minutes: v })} disabled={running}>
-                      <SelectTrigger className="w-28">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {[3, 5, 10, 15].map((m) => (
-                          <SelectItem key={m} value={String(m)}>
-                            {m} min
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  {rows.length > 1 && !running && (
-                    <Button variant="ghost" size="icon-xs" title="entfernen" onClick={() => setRows(rows.filter((_, j) => j !== i))}>
-                      <XIcon />
+                <div key={i} className="grid gap-2 rounded-md border p-3">
+                  <div className="flex flex-wrap items-end gap-3">
+                    <div className="grid gap-1.5">
+                      <Label>Gespräch</Label>
+                      <Select value={r.interview} onValueChange={(v) => update(i, { interview: v })} disabled={running}>
+                        <SelectTrigger className="w-32">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {ready.map((id) => (
+                            <SelectItem key={id} value={id}>
+                              {id}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label>von (min:s)</Label>
+                      <Input className="w-24" value={r.from} disabled={running} onChange={(e) => update(i, { from: e.target.value })} />
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label>bis (min:s)</Label>
+                      <Input className="w-24" value={r.to} disabled={running} onChange={(e) => update(i, { to: e.target.value })} />
+                    </div>
+                    <Button variant="outline" size="sm" disabled={running || !r.interview} onClick={() => void suggest(i)} title="Vom ersten bis zum letzten korrigierten Redebeitrag">
+                      <SparklesIcon />
+                      Aus Korrekturen vorschlagen
                     </Button>
-                  )}
+                    {rows.length > 1 && !running && (
+                      <Button variant="ghost" size="icon-xs" title="entfernen" onClick={() => setRows(rows.filter((_, j) => j !== i))}>
+                        <XIcon />
+                      </Button>
+                    )}
+                  </div>
+                  <StretchInfo row={r} />
                 </div>
               ))}
               {rows.length < 6 && !running && (
-                <Button variant="outline" size="sm" className="w-fit" onClick={() => setRows([...rows, { interview: ready[0], from: "0:00", minutes: "5" }])}>
+                <Button variant="outline" size="sm" className="w-fit" onClick={() => setRows([...rows, newRow(ready[0])])}>
                   <PlusIcon />
                   Weiteren Ausschnitt
                 </Button>
@@ -188,6 +239,30 @@ export function TuningCard() {
         {state?.report && !running && <Report report={state.report} />}
       </CardContent>
     </Card>
+  );
+}
+
+function StretchInfo({ row }: { row: Row }) {
+  const st = row.stretch;
+  if (row.error) return <p className="text-destructive text-xs">{row.error}</p>;
+  if (!st) return <LoaderIcon className="text-muted-foreground size-4 animate-spin" />;
+  const unchecked = st.corrections + st.speaker_corrections === 0 && !st.reviewed;
+  return (
+    <div className="grid gap-1 text-xs">
+      <p>
+        <b>
+          {clock(st.start)} – {clock(st.end)}
+        </b>{" "}
+        <span className="text-muted-foreground">
+          (Ränder auf ganze Redebeiträge gelegt) · {st.turns} Redebeiträge · {st.words} Wörter ·{" "}
+          {st.corrections} Wortkorrekturen · {st.speaker_corrections} Sprecherkorrekturen{st.reviewed ? " · Korrektur abgeschlossen" : ""}
+        </span>
+      </p>
+      <p className="text-muted-foreground">
+        Beginnt mit „{st.begins}“ und endet mit „{st.ends}“
+      </p>
+      {unchecked && <p className="text-destructive">In diesem Ausschnitt ist nichts korrigiert – er zählt nur als Maßstab, wenn du ihn durchgesehen hast.</p>}
+    </div>
   );
 }
 

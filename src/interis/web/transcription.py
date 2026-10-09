@@ -22,6 +22,10 @@ from pydantic import BaseModel, Field
 
 from interis.config import Paths
 from interis.models import ASR_MODELS
+from interis.pipeline.evaluate import reference_from_transcript
+from interis.pipeline.tune import Span, TuneError, snap_to_turns, suggest_span
+from interis.pipeline.types import Transcript
+from interis.web.edits import apply_edits
 from interis.web.jobs import trial_file, trial_steps
 
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
@@ -230,26 +234,74 @@ def add_transcription_routes(app: FastAPI, paths: Paths, store, runner,
         return {"ok": True}
 
     # ---------------------------------------------------------------- automatic tuning
+    def _effective(iid: str) -> Transcript:
+        """The transcript as you corrected it: the ground truth of the tuning."""
+        interview_check(iid)
+        src = paths.exports / iid / f"{iid}.json"
+        if not src.is_file():
+            raise HTTPException(422, f"{iid}: noch nicht transkribiert")
+        raw = Transcript.from_dict(json.loads(src.read_text(encoding="utf-8")))
+        return apply_edits(raw, store.word_edits(iid), store.speaker_edits(iid))
+
+    def _describe(iid: str, t: Transcript, span: Span) -> dict[str, Any]:
+        """What the stretch contains, so you can see what the tuning will measure against."""
+        ref = reference_from_transcript(t, span.start, span.end)
+        edits = [e for e in store.word_edits(iid) if span.first <= e["turn"] <= span.last]
+        moved = [e for e in store.speaker_edits(iid) if span.first <= e["turn"] <= span.last]
+        return {"interview": iid, "start": span.start, "end": span.end,
+                "turns": span.last - span.first + 1, "words": len(ref.norm),
+                "corrections": sum(e["kind"] == "correction" for e in edits),
+                "speaker_corrections": len(moved), "reviewed": store.reviewed(iid),
+                "begins": " ".join(ref.raw[:8]), "ends": " ".join(ref.raw[-8:])}
+
+    def _span(iid: str, t: Transcript, start: float, end: float) -> Span:
+        try:
+            return snap_to_turns(t, start, end)
+        except TuneError as e:
+            raise HTTPException(422, f"{iid}: {e}") from e
+
+    @app.post("/api/tuning/preview")
+    def preview_window(body: TuneWindow) -> dict[str, Any]:
+        """The stretch with its edges moved to whole speaker turns, and what it contains."""
+        t = _effective(body.interview)
+        return _describe(body.interview, t, _span(body.interview, t, body.start, body.end))
+
+    @app.get("/api/tuning/suggest")
+    def suggest_window(interview: str) -> dict[str, Any]:
+        """The stretch you corrected: from the first to the last turn with a correction."""
+        t = _effective(interview)
+        corrected = sorted({e["turn"] for e in store.word_edits(interview)
+                            if e["kind"] == "correction"}
+                           | {e["turn"] for e in store.speaker_edits(interview)})
+        try:
+            span = suggest_span(t, corrected, store.reviewed(interview))
+        except TuneError as e:
+            raise HTTPException(422, f"{interview}: {e}") from e
+        if span is None:
+            raise HTTPException(422, f"{interview}: noch nichts korrigiert und „Korrektur "
+                                     "abgeschlossen“ nicht gesetzt")
+        return _describe(interview, t, span)
+
     @app.post("/api/tuning")
     def start_tuning(body: TuneBody) -> dict[str, int]:
         """Search the settings closest to what you corrected in these stretches."""
         if any(j["kind"] == "tune" and j["status"] in ("queued", "running")
                for j in store.jobs()):
             raise HTTPException(409, "Die Optimierung läuft schon")
+        windows = []
         for w in body.windows:
             interview_check(w.interview)
             if not store.part_paths(w.interview):
                 raise HTTPException(422, f"{w.interview}: noch keine Aufnahme hochgeladen")
-            if not (paths.exports / w.interview / f"{w.interview}.json").is_file():
-                raise HTTPException(422, f"{w.interview}: noch nicht transkribiert")
-            if not 60 <= w.end - w.start <= 900:
-                raise HTTPException(422, "Jeder Ausschnitt: zwischen 1 und 15 Minuten")
             if not (store.reviewed(w.interview) or store.word_edits(w.interview)
                     or store.speaker_edits(w.interview)):
                 raise HTTPException(
                     422, f"{w.interview}: noch nichts korrigiert – die Optimierung misst "
                          "gegen deinen korrigierten Text (oder „Korrektur abgeschlossen“)")
-        job = store.add_job("tune", "", {"windows": [w.model_dump() for w in body.windows],
+            t = _effective(w.interview)
+            span = _span(w.interview, t, w.start, w.end)  # the stretch the job really uses
+            windows.append({"interview": w.interview, "start": span.start, "end": span.end})
+        job = store.add_job("tune", "", {"windows": windows,
                                          "budget_minutes": body.budget_minutes})
         runner.notify()
         return {"job": job}

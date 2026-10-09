@@ -16,7 +16,9 @@ from interis.pipeline.tune import (
     coordinate_descent,
     merge_hotwords,
     pipeline_options,
+    snap_to_turns,
     split_windows,
+    suggest_span,
     tune,
 )
 from interis.pipeline.types import Transcript, Turn, Word
@@ -146,10 +148,10 @@ def interview(tmp_path):
     c.post("/api/interviews/I01/parts?ext=wav", content=b"RIFF0000" * 10, headers=H)
     store = Store(tmp_path / "interis.db")
     audio = store.part_paths("I01")[0]
-    t = _transcript()
-    t.meta["audio"] = {"duration_s": 400.0, "sha256": "x",
+    t = _transcript(reps=20)
+    t.meta["audio"] = {"duration_s": 440.0, "sha256": "x",
                        "parts": [{"sha256": sha256_file(audio), "offset_s": 0.0,
-                                  "duration_s": 400.0}]}
+                                  "duration_s": 440.0}]}
     out = tmp_path / "exports" / "I01"
     out.mkdir(parents=True)
     (out / "I01.json").write_text(json.dumps(t.to_dict()), encoding="utf-8")
@@ -162,15 +164,20 @@ def test_website_starts_a_tuning_job_for_corrected_stretches(interview):
     r = c.post("/api/tuning", json=body, headers=H)
     assert r.status_code == 422 and "noch nichts korrigiert" in r.json()["detail"]
     store.set_reviewed("I01", True)
-    for bad in ({"start": 0, "end": 30}, {"start": 0, "end": 5000}, {"interview": "NOPE"}):
-        w = {"interview": "I01", "start": 0, "end": 120, **bad}
-        assert c.post("/api/tuning", json={"windows": [w]}, headers=H).status_code in (404, 422)
+    w = {"interview": "NOPE", "start": 0, "end": 120}
+    assert c.post("/api/tuning", json={"windows": [w]}, headers=H).status_code in (404, 422)
+    w = {"interview": "I01", "start": 9999, "end": 12000}
+    assert c.post("/api/tuning", json={"windows": [w]}, headers=H).status_code == 422
     job = store.job(c.post("/api/tuning", json=body, headers=H).json()["job"])
     assert job["kind"] == "tune" and job["interview_id"] == ""
+    # the job gets the stretch with its edges on speaker turns (120 s falls inside a turn)
+    spans = _transcript(reps=20).turns
+    end = max(t.end for t in spans if t.start < 120)
+    assert job["options"]["windows"] == [{"interview": "I01", "start": 0.0, "end": end}]
     assert c.post("/api/tuning", json=body, headers=H).status_code == 409
     cmd = JobRunner(paths, store, lambda _i: None, lambda _i: "").command(job)
-    assert cmd[cmd.index("tune"):] == ["tune", "--progress-json", "--window", "I01:0.0-120.0",
-                                       "--budget-minutes", "30.0"]
+    assert cmd[cmd.index("tune"):] == ["tune", "--progress-json", "--window",
+                                       f"I01:0.0-{end}", "--budget-minutes", "30.0"]
     assert sys.executable in cmd[0]
     assert c.get("/api/tuning").json()["job"]["id"] == job["id"]
 
@@ -203,10 +210,60 @@ def test_command_rejects_a_recording_that_changed_and_short_stretches(interview)
     paths, _c, store = interview
     ok = cli._tune_window("I01:0-120", paths, store)
     assert ok.audio == store.part_paths("I01") and len(ok.ref.norm) >= 50
-    with pytest.raises(ValueError, match="between"):
-        cli._tune_window("I01:0-20", paths, store)
+    short = cli._tune_window("I01:0-20", paths, store)  # too short: grows by whole turns
+    assert short.end - short.start >= 60
     store.part_paths("I01")[0].write_bytes(b"other")
     with pytest.raises(ValueError, match="differ"):
         cli._tune_window("I01:0-120", paths, store)
     with pytest.raises(ValueError, match="no transcript"):
         cli._tune_window("I99:0-120", paths, store)
+
+
+# ------------------------------------------------------------------ where the stretch lies
+
+def test_edges_move_to_whole_turns_and_never_cut_a_sentence():
+    t = _transcript()
+    starts = [x.start for x in t.turns]
+    span = snap_to_turns(t, starts[3] + 4, starts[3] + 40)  # starts inside turn 3
+    assert span.start == starts[3] and span.first == 3
+    assert t.turns[span.last].end >= starts[3] + 40  # ends where that turn ends
+    assert span.end == t.turns[span.last].end and span.end - span.start >= 36
+
+
+def test_too_short_stretches_grow_and_too_long_ones_shrink_by_whole_turns():
+    t = _transcript(reps=40)
+    short = snap_to_turns(t, 0, 5)
+    assert short.end - short.start >= 60 and short.end == t.turns[short.last].end
+    long = snap_to_turns(t, 0, 5000)
+    assert long.end - long.start <= 900 and long.end == t.turns[long.last].end
+    with pytest.raises(TuneError, match="behind the end"):
+        snap_to_turns(t, 9999, 10000)
+
+
+def test_suggestion_covers_the_corrected_turns_or_the_start_if_all_was_checked():
+    t = _transcript(reps=40)
+    span = suggest_span(t, [10, 14], reviewed=False)
+    assert span.first <= 10 and span.last >= 14 and span.start == t.turns[span.first].start
+    assert suggest_span(t, [], reviewed=False) is None
+    start = suggest_span(t, [], reviewed=True)
+    assert start.start == 0 and start.end - start.start <= 600 + 25
+    capped = suggest_span(t, [0, 70], reviewed=False)
+    assert capped.end - capped.start <= 600 + 25
+
+
+def test_website_shows_what_a_stretch_contains_and_suggests_one(interview):
+    _paths, c, store = interview
+    ask = {"interview": "I01", "start": 30, "end": 200}
+    assert c.get("/api/tuning/suggest?interview=I01").status_code == 422  # nothing corrected
+    store.set_word_edits("I01", [{"turn": 2, "word": 1, "kind": "correction", "tag": "",
+                                  "action": "replace", "text": "x"},
+                                 {"turn": 6, "word": 0, "kind": "correction", "tag": "",
+                                  "action": "replace", "text": "y"}])
+    p = c.post("/api/tuning/preview", json=ask, headers=H).json()
+    t = _transcript(reps=20)
+    assert p["start"] in [x.start for x in t.turns] and p["end"] in [x.end for x in t.turns]
+    assert p["words"] > 50 and p["begins"] and p["ends"] and p["turns"] >= 4
+    assert p["start"] <= 30 and p["end"] >= 200
+    sug = c.get("/api/tuning/suggest?interview=I01").json()
+    assert sug["start"] == t.turns[2].start and sug["end"] >= t.turns[6].end
+    assert sug["corrections"] == 2 and sug["speaker_corrections"] == 0

@@ -395,15 +395,12 @@ def cmd_transcribe(args: argparse.Namespace, paths: Paths) -> int:
     return 0
 
 
-MAX_TUNE_WINDOW_S = 900.0
-
-
 def _tune_window(spec: str, paths: Paths, store):
     """``ID:start-end`` (seconds; ``ID`` alone = from the start to the end of the interview)
     -> the corrected stretch with its audio, checked against the stored recordings."""
     from interis.models import sha256_file
     from interis.pipeline.evaluate import reference_from_transcript
-    from interis.pipeline.tune import MIN_WINDOW_S, Window
+    from interis.pipeline.tune import MAX_WINDOW_S, Window, snap_to_turns
     from interis.pipeline.types import Transcript
     from interis.web.edits import apply_edits
 
@@ -420,13 +417,15 @@ def _tune_window(spec: str, paths: Paths, store):
         raise ValueError(f"{iid}: the recordings are missing or differ from the transcript")
     start, _, end = span.partition("-")
     a = float(start) if start else 0.0
-    b = float(end) if end else min(raw.meta["audio"]["duration_s"], a + MAX_TUNE_WINDOW_S)
+    b = float(end) if end else min(raw.meta["audio"]["duration_s"], a + MAX_WINDOW_S)
     if not 0 <= a < b <= raw.meta["audio"]["duration_s"] + 1:
         raise ValueError(f"{iid}: time window outside the recording")
-    if b - a < MIN_WINDOW_S or b - a > MAX_TUNE_WINDOW_S:
-        raise ValueError(f"{iid}: the stretch must be between {MIN_WINDOW_S:.0f} s and "
-                         f"{MAX_TUNE_WINDOW_S / 60:.0f} min long")
     effective = apply_edits(raw, store.word_edits(iid), store.speaker_edits(iid))
+    try:  # whole speaker turns only: never cut in the middle of what somebody says
+        span = snap_to_turns(effective, a, b)
+    except ValueError as e:
+        raise ValueError(f"{iid}: {e}") from e
+    a, b = span.start, span.end
     ref = reference_from_transcript(effective, a, b)
     if len(ref.norm) < 50:
         raise ValueError(f"{iid}: fewer than 50 words in this stretch")
