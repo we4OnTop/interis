@@ -5,6 +5,8 @@ later as separate transformations applied at export time – the stored data sta
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -63,9 +65,21 @@ def _questions_by_turn(transcript: Transcript) -> dict[int, list[dict[str, Any]]
     return out
 
 
+def _replace_file(path: Path, write: Callable[[Path], None]) -> None:
+    """Write a whole file through a temporary file in the same folder, then move it into
+    place: an interrupted write leaves the previous file intact (not a half-written one)."""
+    tmp = path.with_suffix(".tmp")
+    try:
+        write(tmp)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    os.replace(tmp, path)
+
+
 def write_json(transcript: Transcript, path: Path) -> None:
-    path.write_text(json.dumps(transcript.to_dict(), ensure_ascii=False, indent=2),
-                    encoding="utf-8")
+    text = json.dumps(transcript.to_dict(), ensure_ascii=False, indent=2)
+    _replace_file(path, lambda p: p.write_text(text, encoding="utf-8"))
 
 
 def write_txt(transcript: Transcript, path: Path) -> None:
@@ -83,7 +97,7 @@ def write_txt(transcript: Transcript, path: Path) -> None:
             lines += [f"--- {heading} ---", ""]
         lines += [f"[{stamp(transcript, turn.start)}] "
                   f"{speaker_name(transcript, turn.speaker)}: {text}", ""]
-    path.write_text("\n".join(lines), encoding="utf-8")
+    _replace_file(path, lambda p: p.write_text("\n".join(lines), encoding="utf-8"))
 
 
 def coverage(transcript: Transcript) -> list[dict[str, Any]]:
@@ -187,4 +201,4 @@ def write_docx(transcript: Transcript, path: Path) -> None:
                 f"{stamp(transcript, s['passages'][0]['start'])} "
                 f"({_SUGGESTION_LABEL[s['type']]}, "
                 f"{s['score']:.2f})" for s in row["elsewhere"]) or "–"
-    doc.save(str(path))
+    _replace_file(path, lambda p: doc.save(str(p)))

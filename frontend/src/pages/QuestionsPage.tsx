@@ -2,7 +2,8 @@ import { useEffect } from "react";
 import { ChevronLeftIcon, ChevronRightIcon, FileTextIcon, LayoutGridIcon, LoaderIcon, MessageCircleQuestionIcon, PencilIcon } from "lucide-react";
 
 import { InterviewFilter } from "@/components/InterviewFilter";
-import { CellContent, PlayButton, StatusBadge, StatusDot, Time } from "@/components/review";
+import { LoadError } from "@/components/LoadError";
+import { CellContent, PlayButton, QuestionMeta, StatusBadge, StatusDot, Time } from "@/components/review";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,7 +20,7 @@ const UNASSIGNED = "_ohne";
 export function QuestionsPage({ code }: { code: string | null }) {
   const { detail } = useProject();
   const pid = detail!.project.id;
-  const { data, reload } = useCompare();
+  const { data, reload, error } = useCompare();
   const { hidden, toggle } = useHidden(pid);
   const [showSuggestions, setShowSuggestions] = useStoredFlag("interis.suggestions", true);
 
@@ -37,7 +38,8 @@ export function QuestionsPage({ code }: { code: string | null }) {
     return () => window.removeEventListener("keydown", on);
   }, [index, questions, pid]);
 
-  if (!data) return <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
+  if (!data)
+    return error ? <LoadError message={error} onRetry={() => void reload()} /> : <LoaderIcon className="text-muted-foreground m-6 size-5 animate-spin" />;
   if (!data.guide) return <Empty pid={pid} what="guide" />;
   if (!data.interviews.length) return <Empty pid={pid} what="interviews" />;
 
@@ -49,7 +51,7 @@ export function QuestionsPage({ code }: { code: string | null }) {
       <div className="flex h-[calc(100vh-3.5rem)]">
         <QuestionNav data={data} ids={ids} code={code} pid={pid} />
         <main className="min-w-0 flex-1 overflow-y-auto pb-24">
-          <div className="bg-background/95 sticky top-0 z-10 border-b px-6 py-3 backdrop-blur">
+          <div className="bg-background/95 sticky top-0 z-10 border-b px-4 sm:px-6 py-3 backdrop-blur">
             <InterviewFilter
               ids={data.interviews}
               hidden={hidden}
@@ -58,7 +60,7 @@ export function QuestionsPage({ code }: { code: string | null }) {
               setShowSuggestions={setShowSuggestions}
             />
           </div>
-          <div className="space-y-5 px-6 py-5">
+          <div className="space-y-5 px-4 sm:px-6 py-5">
             {selected ? (
               <QuestionDetail
                 q={selected}
@@ -150,7 +152,7 @@ function QuestionNav({ data, ids, code, pid }: { data: Compare; ids: string[]; c
 function Legend() {
   return (
     <div className="text-muted-foreground flex flex-wrap gap-4 text-xs">
-      {(["asked", "answered_elsewhere", "omitted", "missing"] as const).map((s) => (
+      {(["asked", "answered_elsewhere", "omitted", "explained", "skipped", "missing"] as const).map((s) => (
         <span key={s} className="flex items-center gap-1.5">
           <StatusDot status={s} />
           {STATUS_LABEL[s]}
@@ -265,6 +267,7 @@ function QuestionDetail({
           <h1 className="text-xl leading-snug font-semibold">{q.text}</h1>
           {q.variants.length > 0 && <p className="text-muted-foreground mt-1 text-sm">auch: {q.variants.join(" · ")}</p>}
           {q.probes.length > 0 && <p className="text-muted-foreground text-sm">Nachfragen: {q.probes.join(" · ")}</p>}
+          <QuestionMeta q={q} />
         </div>
         <div className="flex shrink-0 gap-1">
           <Button variant="outline" size="icon-sm" disabled={!prev} onClick={() => prev && navigate(href.questions(pid, prev))} title="vorige Frage (←)">

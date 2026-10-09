@@ -39,25 +39,46 @@ $base = & $venvPython -c "import sys, pathlib; print(pathlib.Path(sys._base_exec
 if (-not (Test-Path $base)) { throw "Could not resolve base interpreter: $base" }
 if ($base -like '*WindowsApps*') { throw "Refusing: $base is the Microsoft Store Python." }
 
-$existing = Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
+# The desktop app runs under pythonw.exe from the same folder: it needs the same rule.
+$baseGui = Join-Path (Split-Path $base) 'pythonw.exe'
+$guiRule = "$RuleName (GUI)"
+
+function Set-BlockRule([string]$name, [string]$program) {
+    $rule = Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue
+    if ($rule) {
+        $rule | Set-NetFirewallRule -Program $program -Direction Outbound -Action Block -Profile Any
+        $rule | Enable-NetFirewallRule
+        Write-Host "Updated and enabled '$name' for $program"
+    } else {
+        New-NetFirewallRule -DisplayName $name -Direction Outbound -Action Block `
+            -Program $program -Profile Any -Description 'Interis: interview data must never leave this machine.' | Out-Null
+        Write-Host "Created '$name' for $program"
+    }
+}
 
 if ($Remove) {
-    if ($existing) { $existing | Remove-NetFirewallRule; Write-Host "Removed rule '$RuleName'." }
-    else { Write-Host 'No rule to remove.' }
+    foreach ($name in @($RuleName, $guiRule)) {
+        $rule = Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue
+        if ($rule) { $rule | Remove-NetFirewallRule; Write-Host "Removed rule '$name'." }
+    }
+    if (-not (Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue) -and
+        -not (Get-NetFirewallRule -DisplayName $guiRule -ErrorAction SilentlyContinue)) {
+        Write-Host 'No rule to remove.'
+    }
     return
 }
 if ($Disable) {
-    if ($existing) { $existing | Disable-NetFirewallRule; Write-Host "Disabled '$RuleName'. Re-run without -Disable afterwards!" }
+    foreach ($name in @($RuleName, $guiRule)) {
+        $rule = Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue
+        if ($rule) { $rule | Disable-NetFirewallRule; Write-Host "Disabled '$name'. Re-run without -Disable afterwards!" }
+    }
     return
 }
 
-if ($existing) {
-    $existing | Set-NetFirewallRule -Program $base -Direction Outbound -Action Block -Profile Any
-    $existing | Enable-NetFirewallRule
-    Write-Host "Updated and enabled '$RuleName' for $base"
+Set-BlockRule $RuleName $base
+if (Test-Path $baseGui) {
+    Set-BlockRule $guiRule $baseGui
 } else {
-    New-NetFirewallRule -DisplayName $RuleName -Direction Outbound -Action Block `
-        -Program $base -Profile Any -Description 'Interis: interview data must never leave this machine.' | Out-Null
-    Write-Host "Created '$RuleName' for $base"
+    Write-Warning "No $baseGui next to the base interpreter: the desktop app is not covered by a rule."
 }
 Write-Host 'Note: this blocks internet access for this Python interpreter in every project that uses it.'

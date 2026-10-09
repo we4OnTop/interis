@@ -77,3 +77,42 @@ def test_require_offline_refuses_without_bootstrap():
             print("REFUSED")
         """)
     assert r.stdout.strip() == "REFUSED"
+
+
+def test_proxy_settings_are_removed_so_the_hook_sees_real_destinations():
+    r = _run("""
+        import os
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:9"
+        from interis import _bootstrap
+        _bootstrap.go_offline()
+        print("GONE" if "HTTPS_PROXY" not in os.environ else "STILL SET")
+        print("SAVED" if _bootstrap.proxy_env_removed.get("HTTPS_PROXY") else "NOT SAVED")
+        """)
+    assert r.stdout.split() == ["GONE", "SAVED"], r.stdout + r.stderr
+
+
+def test_reverse_dns_lookups_are_blocked_but_loopback_is_not():
+    r = _run("""
+        import socket
+        from interis import _bootstrap
+        _bootstrap.go_offline()
+        for attempt in (lambda: socket.gethostbyaddr("8.8.8.8"),
+                        lambda: socket.getnameinfo(("8.8.8.8", 53), 0)):
+            try:
+                attempt()
+            except _bootstrap.NetworkBlockedError:
+                print("BLOCKED")
+        print("LOOPBACK-OK" if socket.gethostbyaddr("127.0.0.1") else "")
+        """)
+    assert r.stdout.split() == ["BLOCKED", "BLOCKED", "LOOPBACK-OK"], r.stdout + r.stderr
+
+
+def test_system_proxy_lookup_returns_nothing_after_go_offline():
+    r = _run("""
+        import os, urllib.request
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:9"
+        from interis import _bootstrap
+        _bootstrap.go_offline()
+        print("PROXIES", urllib.request.getproxies())
+        """)
+    assert r.stdout.strip() == "PROXIES {}", r.stdout + r.stderr

@@ -10,12 +10,15 @@ export function useCompare() {
   const { fail } = useFeedback();
   const pid = detail!.project.id;
   const [data, setData] = useState<Compare | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
       setData(await api<Compare>("GET", `/api/projects/${pid}/compare`));
+      setError(null);
     } catch (e) {
       fail(e);
+      setError(e instanceof Error ? e.message : String(e));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pid]);
@@ -24,7 +27,7 @@ export function useCompare() {
     void reload();
   }, [reload, dataVersion, detail?.guide_text]);
 
-  return { data, reload };
+  return { data, reload, error };
 }
 
 /** Interviews hidden from the comparison (remembered per project in this browser). */

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess  # noqa: S404 – fixed argument list, never a shell
 import sys
 import threading
@@ -22,11 +23,51 @@ import time
 from collections import deque
 from pathlib import Path
 
-from interis._bootstrap import OFFLINE
+from interis._bootstrap import OFFLINE, proxy_env_removed
 from interis.config import Paths
+from interis.pipeline.tune import merge_hotwords
 from interis.web.store import Store
 
 POLL_S = 1.0
+
+# Transcription settings (a job's options) and their command line flags.
+SETTING_FLAGS = {"model": "--model", "compute_type": "--compute-type",
+                 "beam_size": "--beam-size", "vad_threshold": "--vad-threshold",
+                 "speakers": "--speakers", "min_duration_off": "--min-duration-off",
+                 "voice_margin": "--voice-margin"}
+
+
+def settings_args(options: dict) -> list[str]:
+    args = ["--model", "whisper-large-v3"] if "model" not in options else []
+    for key, flag in SETTING_FLAGS.items():
+        if options.get(key) is not None:
+            args += [flag, str(options[key])]
+    if options.get("room_mic") is True:
+        args.append("--room-mic")
+    if options.get("sentence_level") is True:
+        args.append("--speaker-per-sentence")
+    if options.get("dereverb") is True:
+        args += ["--dereverb", "--wpe-taps", str(int(options.get("wpe_taps", 10))),
+                 "--wpe-delay", str(int(options.get("wpe_delay", 3))),
+                 "--wpe-iterations", str(int(options.get("wpe_iterations", 3)))]
+    return args
+
+
+def trial_file(paths: Paths, job_id: int) -> Path:
+    return paths.root / "trials" / f"{int(job_id)}.json"
+
+
+def trial_steps(paths: Paths, job_id: int) -> Path:
+    """Folder with a trial's stage audio and step results (see run.write_steps)."""
+    return paths.root / "trials" / str(int(job_id))
+
+
+def job_message(text: str) -> str:
+    """First line of a message for the UI, with file paths reduced to their file names.
+    Job messages are shown on the website and must not reveal folders of the data."""
+    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    line = re.sub(r"[^\s'\"]*[\\/]", "", line)
+    return line.replace("\\", "").replace("/", "")[:500]
 
 
 class JobRunner:
@@ -62,15 +103,15 @@ class JobRunner:
         self._wake.set()
 
     def cancel(self, job_id: int) -> bool:
-        job = self.store.job(job_id)
-        if job is None or job["status"] not in ("queued", "running"):
-            return False
-        with self._lock:
+        with self._lock:  # the same lock as _execute: a job cannot start meanwhile
+            job = self.store.job(job_id)
+            if job is None or job["status"] not in ("queued", "running"):
+                return False
             if self._current == job_id and self._proc is not None:
                 self._cancel.add(job_id)
                 self._proc.terminate()
                 return True
-        self.store.update_job(job_id, status="cancelled", message="abgebrochen")
+            self.store.update_job(job_id, status="cancelled", message="abgebrochen")
         return True
 
     # ------------------------------------------------------------------ worker
@@ -84,46 +125,117 @@ class JobRunner:
             try:
                 self._run(job)
             except Exception as e:  # noqa: BLE001 – a broken job must not stop the queue
-                self.store.update_job(job["id"], status="failed", message=str(e)[:500])
+                self.store.update_job(job["id"], status="failed", message=job_message(str(e)))
 
     def command(self, job: dict) -> list[str]:
         iid = job["interview_id"]
-        base = [sys.executable, "-m", "interis.cli", "--data-dir", str(self.paths.root)]
+        # -I: ignore PYTHON* variables and the working directory, so no other code can be
+        # imported in place of the installed package
+        base = [sys.executable, "-I", "-m", "interis.cli", "--data-dir", str(self.paths.root)]
         if self.paths.models_dir is not None:
             base += ["--models-dir", str(self.paths.models_dir)]
         if job["kind"] == "models":
             # The only job that uses the network: download + verify the pinned models.
-            return [*base, "setup-models", "--use-system-certs", "--allow-verified-mirror",
-                    "--progress-json"]
+            return [*base, "setup-models", "--allow-verified-mirror", "--progress-json"]
+        options = job["options"]
+        if job["kind"] == "trial":  # an excerpt with other settings; touches no interview
+            iid = str(options["interview"])
+        if job["kind"] == "peaks":  # the waveform of one interview's recording
+            return [*base, "peaks", str(options["interview"]), "--progress-json"]
+        if job["kind"] == "tune":  # settings search on corrected stretches; touches no interview
+            cmd = [*base, "tune", "--progress-json"]
+            for w in options["windows"]:
+                cmd += ["--window", f"{w['interview']}:{float(w['start'])}-{float(w['end'])}"]
+            if options.get("budget_minutes"):
+                cmd += ["--budget-minutes", str(float(options["budget_minutes"]))]
+            return cmd
         guide = self.guide_file(iid)
         guide_args = ["--guide", str(guide)] if guide else []
-        if job["kind"] == "transcribe":
+        if job["kind"] == "speakers":
+            transcript = self.paths.exports / iid / f"{iid}.json"
+            if not transcript.is_file():
+                raise RuntimeError("Transkript nicht gefunden")
+            audio = self.store.part_paths(iid)
+            if not audio or not all(p.is_file() for p in audio):
+                raise RuntimeError("Audiodatei nicht gefunden")
+            cmd = [*base, "speakers", str(transcript), "--audio", *map(str, audio),
+                   "--min-seconds", str(float(options["min_seconds"])), "--progress-json"]
+            if options.get("learn"):  # learn the interviewer's voice profile
+                cmd += ["--save-voice", "interviewer", "--speaker", str(options["learn"])]
+                if options.get("until"):
+                    cmd += ["--learn-until", str(float(options["until"]))]
+                return [*cmd, "--replace-voice"] if options.get("replace") else cmd
+            cmd += ["--until", str(float(options["until"])),
+                    "--margin", str(float(options["margin"])),
+                    "--out", str(self._speakers_file(job))]
+            return [*cmd, "--voice", "interviewer"] if options.get("use_voice") else cmd
+        if job["kind"] in ("transcribe", "trial"):
             audio = self.store.part_paths(iid)
             missing = [p.name for p in audio if not p.is_file()]
             if not audio or missing:
                 raise RuntimeError("Audiodatei nicht gefunden: " + ", ".join(missing))
-            cmd = [*base, "transcribe", *map(str, audio), "--id", iid, "--progress-json",
-                   "--model", job["options"].get("model", "whisper-large-v3"), *guide_args]
-            if hotwords := self.hotwords(iid):
+            cmd = [*base, "transcribe", *map(str, audio), "--progress-json",
+                   *settings_args(options)]
+            # the project's glossary, then the terms learned from your corrections
+            if hotwords := merge_hotwords(self.hotwords(iid), options.get("glossary") or []):
                 cmd += ["--hotwords", hotwords]
-            return cmd
+            if job["kind"] == "trial":
+                out = trial_file(self.paths, job["id"])
+                out.parent.mkdir(parents=True, exist_ok=True)
+                return [*cmd, "--id", "PROBE", "--start", str(float(options["start"])),
+                        "--duration", str(float(options["duration"])), "--out", str(out),
+                        "--steps-dir", str(trial_steps(self.paths, job["id"]))]
+            return [*cmd, "--id", iid, *guide_args]
         transcript = self.paths.exports / iid / f"{iid}.json"
         if not transcript.is_file():
             raise RuntimeError("Transkript nicht gefunden")
         return [*base, "analyze", str(transcript), *guide_args]
 
+    def _speakers_file(self, job: dict) -> Path:
+        self.paths.tmp.mkdir(parents=True, exist_ok=True)
+        return self.paths.tmp / f"speakers-{int(job['id'])}.json"
+
+    def _write_edits(self, job: dict, path: Path) -> bool:
+        """The word and speaker edits of an interview as a temporary JSON file (no
+        transcript text is logged). False if there are none."""
+        rows = [{k: e[k] for k in ("turn", "word", "action", "kind", "text", "tag")}
+                for e in self.store.word_edits(job["interview_id"])]
+        speakers = self.store.speaker_edits(job["interview_id"])
+        inserts = self.store.inserts(job["interview_id"])
+        if not rows and not speakers and not inserts:
+            return False
+        self.paths.tmp.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"words": rows, "speakers": speakers, "inserts": inserts},
+                                   ensure_ascii=False), encoding="utf-8")
+        return True
+
     def _run(self, job: dict) -> None:
-        job_id = job["id"]
         cmd = self.command(job)
-        self.store.update_job(job_id, status="running", stage="start", progress=0.0,
-                              message="")
+        edits_file = self.paths.tmp / f"edits-{job['id']}.json"
+        try:
+            # The analysis runs on the edited text; the transcript itself is never changed.
+            if job["kind"] in ("analyze", "speakers") and self._write_edits(job, edits_file):
+                cmd = [*cmd, "--edits", str(edits_file)]
+            self._execute(job, cmd)
+        finally:
+            edits_file.unlink(missing_ok=True)
+            if job["kind"] == "speakers":
+                self._speakers_file(job).unlink(missing_ok=True)
+
+    def _execute(self, job: dict, cmd: list[str]) -> None:
+        job_id = job["id"]
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
         if job["kind"] == "models":  # this process is offline; the download child is not
             for key in OFFLINE:
                 env.pop(key, None)
+            env.update(proxy_env_removed)  # the explicit download may need a proxy
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         tail: deque[str] = deque(maxlen=15)
         with self._lock:
+            if self.store.job(job_id)["status"] != "queued":  # cancelled before it started
+                return
+            self.store.update_job(job_id, status="running", stage="start", progress=0.0,
+                                  message="")
             self._current = job_id
             self._proc = subprocess.Popen(  # noqa: S603 – own CLI, argument list, no shell
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
@@ -141,9 +253,12 @@ class JobRunner:
                 except ValueError:
                     continue
                 now = time.monotonic()
-                if now - last_write >= 1.0 or p["fraction"] >= 1.0:
-                    self.store.update_job(job_id, stage=str(p["stage"])[:40],
-                                          progress=float(p["fraction"]))
+                try:
+                    stage, fraction = str(p["stage"])[:40], float(p["fraction"])
+                except (KeyError, TypeError, ValueError):
+                    continue  # not one of our progress lines; keep reading the output
+                if now - last_write >= 1.0 or fraction >= 1.0:
+                    self.store.update_job(job_id, stage=stage, progress=fraction)
                     last_write = now
             else:
                 tail.append(line)
@@ -156,12 +271,18 @@ class JobRunner:
         if cancelled:
             self.store.update_job(job_id, status="cancelled", message="abgebrochen")
         elif code == 0:
+            if job["kind"] == "transcribe":  # the new transcript replaces the old positions
+                self.store.delete_decisions(job["interview_id"])
+            if job["kind"] == "speakers" and not job["options"].get("learn"):
+                # proposals become corrections you can take back
+                result = json.loads(self._speakers_file(job).read_text(encoding="utf-8"))
+                self.store.set_reference_speakers(job["interview_id"], result["changes"])
             self.store.update_job(job_id, status="done", progress=1.0,
-                                  message=tail[-1] if tail else "")
+                                  message=job_message(tail[-1]) if tail else "")
         else:
             errors = [t for t in tail if "ERROR" in t or "Error" in t]
-            self.store.update_job(job_id, status="failed",
-                                  message=(errors[-1] if errors else "\n".join(tail))[-800:])
+            last = errors[-1] if errors else (tail[-1] if tail else "")
+            self.store.update_job(job_id, status="failed", message=job_message(last))
 
 
 def guide_path_for(paths: Paths, project_id: int) -> Path:

@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 //   #/                         projects
 //   #/p/<pid>                  project: by question (combined)
 //   #/p/<pid>/columns          project: side by side (one column per interview)
+//   #/p/<pid>/workflow         project: workflow status per interview
+//   #/p/<pid>/extract          project: extracts per question and interview
 //   #/p/<pid>/setup            project: guide + interviews
 //   #/p/<pid>/i/<id>?t=<turn>  transcript
 export type Route =
@@ -11,6 +13,8 @@ export type Route =
   | { page: "system" }
   | { page: "questions"; pid: number; code: string | null }
   | { page: "columns"; pid: number }
+  | { page: "workflow"; pid: number }
+  | { page: "extract"; pid: number }
   | { page: "setup"; pid: number; tab: string | null }
   | { page: "interview"; pid: number; id: string; turn: number | null };
 
@@ -22,6 +26,8 @@ export function parseRoute(hash: string): Route {
   if (parts[0] !== "p" || !parts[1] || Number.isNaN(Number(parts[1]))) return { page: "projects" };
   const pid = Number(parts[1]);
   if (parts[2] === "columns") return { page: "columns", pid };
+  if (parts[2] === "workflow") return { page: "workflow", pid };
+  if (parts[2] === "extract") return { page: "extract", pid };
   if (parts[2] === "setup") return { page: "setup", pid, tab: params.get("tab") };
   if (parts[2] === "i" && parts[3]) {
     const t = params.get("t");
@@ -35,6 +41,8 @@ export const href = {
   system: () => "#/system",
   questions: (pid: number, code?: string | null) => `#/p/${pid}${code ? `?q=${encodeURIComponent(code)}` : ""}`,
   columns: (pid: number) => `#/p/${pid}/columns`,
+  workflow: (pid: number) => `#/p/${pid}/workflow`,
+  extract: (pid: number) => `#/p/${pid}/extract`,
   setup: (pid: number, tab?: string) => `#/p/${pid}/setup${tab ? `?tab=${tab}` : ""}`,
   interview: (pid: number, id: string, turn?: number | null) =>
     `#/p/${pid}/i/${encodeURIComponent(id)}${turn === undefined || turn === null ? "" : `?t=${turn}`}`,

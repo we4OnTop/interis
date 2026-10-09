@@ -3,13 +3,16 @@
 
 export type Role = "interviewer" | "interviewee" | "unknown";
 export type Match = "main" | "probe" | "followup" | null;
-export type CellStatus = "asked" | "answered_elsewhere" | "omitted" | "missing";
+export type CellStatus = "asked" | "answered_elsewhere" | "omitted" | "explained" | "skipped" | "missing";
+export type DecisionReason = "not_asked" | "not_relevant" | "other";
+export type EditKind = "correction" | "smoothing";
 export type LinkType = "anticipated" | "later" | "unasked";
 
 export interface Project {
   id: number;
   name: string;
   hotwords: string;
+  smoothing_tags?: string;
   created_at: string;
 }
 
@@ -22,15 +25,85 @@ export interface ProjectSummary extends Project {
 
 export interface Job {
   id: number;
-  kind: "transcribe" | "analyze";
+  kind: "transcribe" | "analyze" | "speakers" | "trial" | "tune";
   interview_id: string;
   status: "queued" | "running" | "done" | "failed" | "cancelled";
-  options: { model?: string };
+  options: Partial<TranscriptionSettings> & { preset?: string };
   stage: string;
   progress: number;
   message: string;
   started_at: string | null;
   queue_pos: number | null;
+}
+
+export interface TranscriptionSettings {
+  model: string;
+  compute_type: "int8" | "float32";
+  beam_size: number;
+  room_mic: boolean;
+  /** null: automatic (0.5, with room_mic 0.35) */
+  vad_threshold: number | null;
+  /** 0: detect the number */
+  speakers: number;
+  /** seconds; null: the model's setting */
+  min_duration_off: number | null;
+  /** one speaker per sentence */
+  sentence_level: boolean;
+  /** reduce reverberation (WPE) */
+  dereverb: boolean;
+  wpe_taps: number;
+  wpe_delay: number;
+  wpe_iterations: number;
+  /** with a voice profile: each sentence goes to the voice it is clearly closer to; null: off */
+  voice_margin: number | null;
+  /** terms learned from your corrections by the automatic tuning */
+  glossary: string[];
+}
+
+export interface Preset {
+  id: number;
+  name: string;
+  options: TranscriptionSettings;
+  is_default: boolean;
+}
+
+export interface SettingsInfo {
+  builtin: TranscriptionSettings;
+  presets: Preset[];
+  models: string[];
+  default: TranscriptionSettings & { preset: string };
+}
+
+export interface Trial {
+  id: number;
+  status: Job["status"];
+  stage: string;
+  progress: number;
+  message: string;
+  options: TranscriptionSettings & { interview: string; start: number; duration: number; label: string };
+  started_at: string | null;
+  elapsed_s: number | null;
+  has_result: boolean;
+}
+
+export interface TrialResult {
+  clip: { start_s: number; duration_s: number } | null;
+  duration_s: number;
+  speakers: { label: string; role: string }[];
+  turns: { speaker: string | null; start: number; end: number; words: { text: string; start: number; prob: number }[] }[];
+  /** what every processing step did (null for trials from before this existed) */
+  steps: TrialSteps | null;
+}
+
+export interface TrialSteps {
+  audio: { file: string; label: string }[];
+  /** the stage recognition and diarization got */
+  heard_by_models: string;
+  /** seconds per step; a step taken from the cache is missing */
+  seconds: Partial<Record<"dereverb" | "transcribe" | "align" | "diarize" | "analyze", number>>;
+  recognised: { start: number; end: number; text: string; avg_logprob: number; no_speech_prob: number }[];
+  aligned: { words: number; aligned: number; mean_shift_ms: number | null };
+  diarization: { start: number; end: number; speaker: string }[];
 }
 
 export interface Part {
@@ -61,6 +134,10 @@ export interface GuideQuestion {
   section: string | null;
   variants: string[];
   probes: string[];
+  tags: string[];
+  hint: string;
+  /** optional, Nebenfrage or Impuls: may be left out without a reason */
+  droppable: boolean;
 }
 
 export interface Guide {
@@ -70,6 +147,8 @@ export interface Guide {
 
 export interface ProjectDetail {
   project: Project;
+  /** effective smoothing tags (defaults when the project has none) */
+  tags: string[];
   guide: Guide | null;
   guide_text: string;
   guide_error: string | null;
@@ -142,11 +221,17 @@ export interface Suggestion extends Passage {
   score: number | null;
 }
 
+export interface Decision {
+  reason: DecisionReason;
+  note: string;
+}
+
 export interface Cell {
   status: CellStatus;
   exchanges: Exchange[];
   links: Link[];
   suggestions: Suggestion[];
+  decision: Decision | null;
 }
 
 export interface Compare {
@@ -154,13 +239,34 @@ export interface Compare {
   interviews: string[];
   cells: Record<string, Record<string, Cell>>;
   unassigned: Record<string, AskedQuestion[]>;
+  /** per interview: the analysis predates its current edits */
+  stale: Record<string, boolean>;
 }
 
 export interface Word {
+  /** effective text (empty when deleted) */
   t: string;
   s: number;
   e: number;
   p: number;
+  /** original text, only for edited words */
+  o?: string;
+  k?: EditKind;
+  /** smoothing tag, only for smoothing edits */
+  g?: string;
+  /** speaker, only when another speaker than the turn's says this word */
+  sp?: string;
+  /** speaker corrected: 1 by hand, 2 assigned by voice (reference) */
+  so?: 1 | 2;
+}
+
+export interface Edit {
+  turn: number;
+  word: number;
+  action: "replace" | "delete";
+  kind: EditKind;
+  text: string;
+  tag: string;
 }
 
 export interface Turn {
@@ -168,6 +274,8 @@ export interface Turn {
   start: number;
   end: number;
   words: Word[];
+  /** id of the paragraph you typed in, if this is one */
+  ins?: number;
 }
 
 export interface Speaker {
@@ -186,6 +294,59 @@ export interface InterviewDetail {
   questions: AskedQuestion[];
   links: Link[];
   cells: Record<string, Cell>;
+  reviewed: boolean;
+  edits_stale: boolean;
+  /** an interviewer voice profile exists (see "Sprecher nach Stimme") */
+  voice_profile: boolean;
+  decisions: { guide_code: string; reason: DecisionReason; note: string }[];
+  edits: Edit[];
+}
+
+export interface Extract {
+  id: number;
+  interview: string;
+  guide_code: string;
+  /** false when the guide no longer has this question code */
+  in_guide: boolean;
+  turn: number;
+  first: number;
+  last: number;
+  start: number;
+  end: number;
+  /** effective passage text */
+  text: string;
+  paraphrase: string;
+  updated_at: string;
+}
+
+export interface WorkflowStep {
+  id: string;
+  title: string;
+  text: string;
+}
+
+export interface WorkflowInterview {
+  id: string;
+  transcribed: boolean;
+  reviewed: boolean;
+  corrections: number;
+  smoothing: number;
+  edits_stale: boolean;
+  asked: number;
+  answered_elsewhere: number;
+  omitted: number;
+  explained: number;
+  missing: string[];
+  unassigned: number;
+  extracts: number;
+  /** server rules for "done" per step; `assign` is informational only (no tick) */
+  done: { transcribe: boolean; correct: boolean; smooth: boolean; assign: boolean; explain: boolean; extract: boolean };
+}
+
+export interface Workflow {
+  guide_questions: number;
+  steps: WorkflowStep[];
+  interviews: WorkflowInterview[];
 }
 
 export class ApiError extends Error {
@@ -202,14 +363,32 @@ export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn;
 }
 
-async function detail(res: Response): Promise<string> {
-  const text = await res.text();
+/** Error text from a response body: the backend's `detail` string, or FastAPI's validation list in German. */
+function message(text: string, fallback: string): string {
   try {
     const d = JSON.parse(text).detail;
-    return typeof d === "string" ? d : JSON.stringify(d);
+    if (typeof d === "string") return d;
+    if (Array.isArray(d))
+      return d
+        .map((e: { loc?: unknown[]; type?: string; ctx?: { max_length?: number } }) => {
+          const field = (e.loc ?? []).filter((p) => p !== "body").join(".");
+          const why =
+            e.type === "string_too_long"
+              ? `zu lang (höchstens ${e.ctx?.max_length} Zeichen)`
+              : e.type?.startsWith("missing")
+                ? "fehlt"
+                : "ungültig";
+          return field ? `${field}: ${why}` : why;
+        })
+        .join("\n");
   } catch {
-    return text || res.statusText;
+    /* not JSON: show the text itself */
   }
+  return text || fallback;
+}
+
+async function detail(res: Response): Promise<string> {
+  return message(await res.text(), res.statusText);
 }
 
 export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
@@ -241,13 +420,7 @@ export function uploadFile(
     xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) return resolve(JSON.parse(xhr.responseText));
-      let msg = xhr.responseText;
-      try {
-        msg = JSON.parse(msg).detail;
-      } catch {
-        /* plain text */
-      }
-      reject(new ApiError(xhr.status, msg));
+      reject(new ApiError(xhr.status, message(xhr.responseText, xhr.statusText)));
     };
     xhr.onerror = () => reject(new ApiError(0, "Verbindung unterbrochen"));
     xhr.send(file);
@@ -308,4 +481,29 @@ declare global {
 export async function pickFolder(start?: string): Promise<string | null | undefined> {
   if (!window.pywebview?.api) return undefined;
   return window.pywebview.api.pick_folder(start ?? "");
+}
+
+export interface ErrorRates {
+  wer: number;
+  speaker_error: number;
+  ref_words: number;
+}
+
+export interface TuneReport {
+  changed: Record<string, string | number | boolean | null>;
+  improved: boolean;
+  held_out: boolean;
+  windows: string[];
+  baseline: { validation: ErrorRates };
+  best: { validation: ErrorRates };
+  evaluations: number;
+  stopped: string;
+  note: string | null;
+  glossary: number;
+}
+
+export interface TuningState {
+  job: Job | null;
+  report: TuneReport | null;
+  has_profile: boolean;
 }

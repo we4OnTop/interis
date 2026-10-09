@@ -24,6 +24,8 @@ interface PlayerControls {
   play: (src: PlayerSource, start: number, end?: number | null) => void;
   toggle: () => void;
   seek: (t: number) => void;
+  /** the exact playing time on the joint timeline (the state only updates a few times a second); null if nothing is loaded */
+  now: () => number | null;
   skip: (delta: number) => void;
   stop: () => void;
 }
@@ -122,6 +124,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         stopAt.current = null;
         seekTo(Math.max(0, offset(s.part) + audio.current!.currentTime + delta), !audio.current!.paused);
       },
+      now: () => (src.current && audio.current ? offset(src.current.part) + audio.current.currentTime : null),
       stop: () => {
         audio.current!.pause();
         src.current = null;

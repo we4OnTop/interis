@@ -70,3 +70,20 @@ def test_missing_model_reports_setup_hint(tmp_path):
     paths.ensure()
     with pytest.raises(ModelError, match="setup-models"):
         verify_ready(paths, "whisper-large-v3")
+
+
+def test_failed_write_keeps_the_previous_file(tmp_path, monkeypatch):
+    """An interrupted write must not leave a half-written transcript behind."""
+    t = _transcript()
+    path = tmp_path / "t.json"
+    write_json(t, path)
+    before = path.read_bytes()
+
+    def interrupted(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(json, "dumps", interrupted)
+    with pytest.raises(OSError):
+        write_json(t, path)
+    assert path.read_bytes() == before
+    assert list(tmp_path.glob("*.tmp")) == []

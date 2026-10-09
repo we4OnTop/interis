@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from interis.analysis.analyze import AnalysisOptions, analyze, group_questions
-from interis.analysis.guide import GuideError, parse_guide
+from interis.analysis.guide import GuideError, label_guide, parse_guide
 from interis.analysis.questions import classify, detect, is_backchannel
 from interis.analysis.roles import assign_roles
 from interis.analysis.sentences import Sentence, split_sentences
@@ -94,10 +94,36 @@ GUIDE = """# Leitfaden
 def test_parse_guide():
     g = parse_guide(GUIDE)
     assert g.title == "Leitfaden"
-    assert [q.code for q in g.questions] == ["F1", "F2", "F3.1"]
+    # the unlabelled question gets the next number above the highest code (F3.1 -> F4)
+    assert [q.code for q in g.questions] == ["F1", "F4", "F3.1"]
     assert g.questions[0].variants == ["Wie sieht ein typischer Arbeitstag aus?"]
     assert g.questions[0].probes == ["Seit wann arbeiten Sie dort?"]
     assert g.questions[1].section == "Hauptteil"
+
+
+def test_unlabelled_questions_number_above_the_highest_code():
+    g = parse_guide("- Erste?\n- F5: Zweite?\n- Dritte?\n")
+    assert [q.code for q in g.questions] == ["F6", "F5", "F7"]
+
+
+def test_label_guide_writes_codes_and_keeps_explicit_ones():
+    text = "# Titel\n## Einstieg\n- Wie geht es Ihnen?\n  ~ Variante\n  > Nachfrage?\n" \
+           "- F2) Was tun Sie?\n1. Woher kommen Sie?\n"
+    labelled = label_guide(text)
+    assert labelled == ("# Titel\n## Einstieg\n- F3: Wie geht es Ihnen?\n  ~ Variante\n"
+                        "  > Nachfrage?\n- F2) Was tun Sie?\n1. F4: Woher kommen Sie?\n")
+    assert [q.code for q in parse_guide(labelled).questions] == \
+        [q.code for q in parse_guide(text).questions]
+    assert label_guide(labelled) == labelled  # nothing left to write
+    assert label_guide("- Frage?\r\n") == "- F1: Frage?\r\n"
+
+
+def test_inserting_an_unlabelled_question_keeps_the_others_codes():
+    saved = label_guide("- Wie lange arbeiten Sie hier?\n- Was hat Sie motiviert?\n")
+    edited = label_guide("- Wie heißen Sie?\n" + saved)
+    codes = {q.text: q.code for q in parse_guide(edited).questions}
+    assert codes == {"Wie heißen Sie?": "F3", "Wie lange arbeiten Sie hier?": "F1",
+                     "Was hat Sie motiviert?": "F2"}
 
 
 def test_guide_errors():

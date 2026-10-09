@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS audio_parts (
 -- Transcriptions / re-analyses started from the website, run one at a time.
 CREATE TABLE IF NOT EXISTS jobs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind         TEXT NOT NULL CHECK (kind IN ('transcribe', 'analyze', 'models')),
+    kind         TEXT NOT NULL CHECK (kind IN ('transcribe', 'analyze', 'models', 'trial',
+                                                  'speakers', 'tune', 'peaks')),
     interview_id TEXT NOT NULL,
     options      TEXT NOT NULL DEFAULT '{}',
     status       TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed',
@@ -79,7 +80,77 @@ CREATE TABLE IF NOT EXISTS answer_links (
     updated_at   TEXT NOT NULL,
     UNIQUE (interview_id, guide_code, turn, first, last)
 );
+-- Corrections (misrecognised words) and smoothing (Glättung), one row per word.
+-- Word indices never move, so all other positions stay valid.
+CREATE TABLE IF NOT EXISTS word_edits (
+    interview_id TEXT NOT NULL,
+    turn         INTEGER NOT NULL,
+    word         INTEGER NOT NULL,
+    action       TEXT NOT NULL CHECK (action IN ('replace', 'delete')),
+    kind         TEXT NOT NULL CHECK (kind IN ('correction', 'smoothing')),
+    text         TEXT NOT NULL DEFAULT '',
+    tag          TEXT NOT NULL DEFAULT '',
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (interview_id, turn, word)
+);
+-- Speaker corrections: the word belongs to another speaker than diarization said.
+CREATE TABLE IF NOT EXISTS speaker_edits (
+    interview_id TEXT NOT NULL,
+    turn         INTEGER NOT NULL,
+    word         INTEGER NOT NULL,
+    speaker      TEXT NOT NULL,
+    source       TEXT NOT NULL DEFAULT 'manual',  -- manual | reference (assigned by voice)
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (interview_id, turn, word)
+);
+-- Extraction: a passage of an answer, summarised in your own words for a guide question.
+-- Paragraphs you typed in (a missed interjection, a missed speaker). ``at`` is the position
+-- the paragraph has in the transcript with all inserts; stored positions refer to that.
+CREATE TABLE IF NOT EXISTS inserted_turns (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    interview_id TEXT NOT NULL,
+    at           INTEGER NOT NULL,
+    speaker      TEXT NOT NULL,
+    start        REAL NOT NULL,
+    "end"        REAL NOT NULL,
+    text         TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS extracts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    interview_id TEXT NOT NULL,
+    guide_code   TEXT NOT NULL,
+    turn         INTEGER NOT NULL,
+    first        INTEGER NOT NULL,
+    last         INTEGER NOT NULL,
+    paraphrase   TEXT NOT NULL DEFAULT '',
+    updated_at   TEXT NOT NULL
+);
+-- Why a guide question has no answer in an interview, when no passage answers it.
+CREATE TABLE IF NOT EXISTS question_decisions (
+    interview_id TEXT NOT NULL,
+    guide_code   TEXT NOT NULL,
+    reason       TEXT NOT NULL CHECK (reason IN ('not_asked', 'not_relevant', 'other')),
+    note         TEXT NOT NULL DEFAULT '',
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (interview_id, guide_code)
+);
+-- Saved transcription settings ("Einstellungen"), for all projects. At most one is the
+-- default; without one, the built-in settings are used.
+CREATE TABLE IF NOT EXISTS asr_presets (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    options     TEXT NOT NULL,
+    is_default  INTEGER NOT NULL DEFAULT 0
+);
 """
+
+
+# Tables whose rows refer to word positions of one interview.
+DECISION_TABLES = ("question_marks", "answer_links", "word_edits", "speaker_edits",
+                   "extracts", "question_decisions", "inserted_turns")
+# the ones keyed by a turn position (question_decisions only by guide code)
+TURN_TABLES = ("question_marks", "answer_links", "word_edits", "speaker_edits", "extracts")
 
 
 def _now() -> str:
@@ -92,7 +163,7 @@ class Store:
         with self._conn() as c:
             c.executescript(SCHEMA)
             sql = c.execute("SELECT sql FROM sqlite_master WHERE name = 'jobs'").fetchone()
-            if sql and "'models'" not in sql["sql"]:  # databases from before model jobs
+            if sql and "'peaks'" not in sql["sql"]:  # databases before the newest kind
                 c.execute("ALTER TABLE jobs RENAME TO jobs_old")
                 c.executescript(SCHEMA)
                 c.execute("INSERT INTO jobs SELECT * FROM jobs_old")
@@ -101,6 +172,16 @@ class Store:
             if "project_id" not in cols:  # databases from before projects existed
                 c.execute("ALTER TABLE interviews ADD COLUMN project_id INTEGER "
                           "REFERENCES projects(id)")
+            if "reviewed_at" not in cols:  # transcript check ("Korrektur abgeschlossen")
+                c.execute("ALTER TABLE interviews ADD COLUMN reviewed_at TEXT")
+            scols = {r["name"] for r in c.execute("PRAGMA table_info(speaker_edits)")}
+            if "source" not in scols:  # speaker corrections from before "by reference"
+                c.execute("ALTER TABLE speaker_edits ADD COLUMN source TEXT NOT NULL "
+                          "DEFAULT 'manual'")
+            pcols = {r["name"] for r in c.execute("PRAGMA table_info(projects)")}
+            if "smoothing_tags" not in pcols:  # one tag per line, empty = defaults
+                c.execute("ALTER TABLE projects ADD COLUMN smoothing_tags TEXT NOT NULL "
+                          "DEFAULT ''")
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -224,17 +305,27 @@ class Store:
                                  (interview_id,)).fetchall()
         return [{**dict(r), "omitted": bool(r["omitted"])} for r in rows]
 
+    def link(self, link_id: int) -> dict[str, Any] | None:
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM answer_links WHERE id = ?", (link_id,)).fetchone()
+        return {**dict(row), "omitted": bool(row["omitted"])} if row else None
+
     def set_link(self, interview_id: str, guide_code: str, turn: int, first: int, last: int,
-                 status: str, source: str, omitted: bool = False, note: str = "") -> int:
+                 status: str, source: str, omitted: bool | None = None,
+                 note: str | None = None) -> int:
+        """Create or update a link. ``omitted`` and ``note`` that are None keep the stored
+        values of an existing link."""
+        flag = None if omitted is None else int(omitted)
         with self._conn() as c:
             c.execute(
                 "INSERT INTO answer_links (interview_id, guide_code, turn, first, last, status,"
-                " source, omitted, note, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                " source, omitted, note, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0), COALESCE(?, ''), ?) "
                 "ON CONFLICT(interview_id, guide_code, turn, first, last) DO UPDATE SET "
-                "status = excluded.status, omitted = excluded.omitted, note = excluded.note, "
-                "updated_at = excluded.updated_at",
-                (interview_id, guide_code, turn, first, last, status, source, int(omitted),
-                 note, _now()),
+                "status = excluded.status, omitted = COALESCE(?, answer_links.omitted), "
+                "note = COALESCE(?, answer_links.note), updated_at = excluded.updated_at",
+                (interview_id, guide_code, turn, first, last, status, source, flag, note,
+                 _now(), flag, note),
             )
             row = c.execute(
                 "SELECT id FROM answer_links WHERE interview_id = ? AND guide_code = ? AND "
@@ -255,6 +346,133 @@ class Store:
         with self._conn() as c:
             c.execute("DELETE FROM answer_links WHERE id = ?", (link_id,))
 
+    # ---------------------------------------------------------------- transcript edits
+    def word_edits(self, interview_id: str) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM word_edits WHERE interview_id = ? "
+                             "ORDER BY turn, word", (interview_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_word_edits(self, interview_id: str, rows: list[dict[str, Any]]) -> None:
+        """Insert or replace the edits of single words (one row per word)."""
+        now = _now()
+        with self._conn() as c:
+            c.executemany(
+                "INSERT INTO word_edits (interview_id, turn, word, action, kind, text, tag, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(interview_id, turn, word) DO UPDATE SET action = excluded.action, "
+                "kind = excluded.kind, text = excluded.text, tag = excluded.tag, "
+                "updated_at = excluded.updated_at",
+                [(interview_id, r["turn"], r["word"], r["action"], r["kind"], r["text"],
+                  r["tag"], now) for r in rows])
+
+    def revert_word_edits(self, interview_id: str, turn: int, first: int, last: int) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM word_edits WHERE interview_id = ? AND turn = ? "
+                      "AND word BETWEEN ? AND ?", (interview_id, turn, first, last))
+
+    def speaker_edits(self, interview_id: str) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT turn, word, speaker, source FROM speaker_edits "
+                             "WHERE interview_id = ? ORDER BY turn, word",
+                             (interview_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_speakers(self, interview_id: str, turn: int, words: dict[int, str | None]) -> None:
+        """{word index: speaker}; ``None`` removes the correction (diarization's speaker)."""
+        now = _now()
+        with self._conn() as c:
+            for word, speaker in words.items():
+                if speaker is None:
+                    c.execute("DELETE FROM speaker_edits WHERE interview_id = ? AND turn = ? "
+                              "AND word = ?", (interview_id, turn, word))
+                else:
+                    c.execute("INSERT INTO speaker_edits (interview_id, turn, word, speaker, "
+                              "source, updated_at) VALUES (?, ?, ?, ?, 'manual', ?) "
+                              "ON CONFLICT(interview_id, turn, word) DO UPDATE SET "
+                              "speaker = excluded.speaker, source = 'manual', "
+                              "updated_at = excluded.updated_at",
+                              (interview_id, turn, word, speaker, now))
+
+    def set_reference_speakers(self, interview_id: str, rows: list[dict[str, Any]]) -> None:
+        """Replace the speakers assigned by voice (``rows``: turn, word, speaker). Words you
+        corrected by hand keep your correction."""
+        now = _now()
+        with self._conn() as c:
+            c.execute("DELETE FROM speaker_edits WHERE interview_id = ? "
+                      "AND source = 'reference'", (interview_id,))
+            c.executemany(
+                "INSERT INTO speaker_edits (interview_id, turn, word, speaker, source, "
+                "updated_at) VALUES (?, ?, ?, ?, 'reference', ?) "
+                "ON CONFLICT(interview_id, turn, word) DO NOTHING",
+                [(interview_id, r["turn"], r["word"], r["speaker"], now) for r in rows])
+
+    def reviewed(self, interview_id: str) -> bool:
+        with self._conn() as c:
+            row = c.execute("SELECT reviewed_at FROM interviews WHERE id = ?",
+                            (interview_id,)).fetchone()
+        return bool(row and row["reviewed_at"])
+
+    def set_reviewed(self, interview_id: str, reviewed: bool) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE interviews SET reviewed_at = ? WHERE id = ?",
+                      (_now() if reviewed else None, interview_id))
+
+    # ---------------------------------------------------------------- extracts
+    def extracts(self, interview_ids: list[str]) -> list[dict[str, Any]]:
+        if not interview_ids:
+            return []
+        marks = ",".join("?" * len(interview_ids))
+        with self._conn() as c:
+            rows = c.execute(
+                f"SELECT * FROM extracts WHERE interview_id IN ({marks}) "  # noqa: S608 – "?" only
+                "ORDER BY interview_id, turn, first", interview_ids).fetchall()
+        return [dict(r) for r in rows]
+
+    def extract(self, extract_id: int) -> dict[str, Any] | None:
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM extracts WHERE id = ?", (extract_id,)).fetchone()
+        return dict(row) if row else None
+
+    def add_extract(self, interview_id: str, guide_code: str, turn: int, first: int,
+                    last: int, paraphrase: str) -> int:
+        with self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO extracts (interview_id, guide_code, turn, first, last, paraphrase, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (interview_id, guide_code, turn, first, last, paraphrase, _now()))
+        return int(cur.lastrowid)
+
+    def update_extract(self, extract_id: int, paraphrase: str) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE extracts SET paraphrase = ?, updated_at = ? WHERE id = ?",
+                      (paraphrase, _now(), extract_id))
+
+    def delete_extract(self, extract_id: int) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM extracts WHERE id = ?", (extract_id,))
+
+    # ---------------------------------------------------------------- question decisions
+    def decisions(self, interview_id: str) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM question_decisions WHERE interview_id = ?",
+                             (interview_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_decision(self, interview_id: str, guide_code: str, reason: str, note: str) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO question_decisions (interview_id, guide_code, reason, note, "
+                "updated_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(interview_id, guide_code) DO UPDATE SET reason = excluded.reason, "
+                "note = excluded.note, updated_at = excluded.updated_at",
+                (interview_id, guide_code, reason, note, _now()))
+
+    def delete_decision(self, interview_id: str, guide_code: str) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM question_decisions WHERE interview_id = ? AND guide_code = ?",
+                      (interview_id, guide_code))
+
     # ---------------------------------------------------------------- projects
     def create_project(self, name: str, hotwords: str = "") -> int:
         with self._conn() as c:
@@ -272,13 +490,17 @@ class Store:
             row = c.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         return dict(row) if row else None
 
-    def update_project(self, project_id: int, name: str | None, hotwords: str | None) -> None:
+    def update_project(self, project_id: int, name: str | None, hotwords: str | None,
+                       smoothing_tags: str | None = None) -> None:
         with self._conn() as c:
             if name is not None:
                 c.execute("UPDATE projects SET name = ? WHERE id = ?", (name, project_id))
             if hotwords is not None:
                 c.execute("UPDATE projects SET hotwords = ? WHERE id = ?",
                           (hotwords, project_id))
+            if smoothing_tags is not None:
+                c.execute("UPDATE projects SET smoothing_tags = ? WHERE id = ?",
+                          (smoothing_tags, project_id))
 
     # ---------------------------------------------------------------- jobs
     def add_job(self, kind: str, interview_id: str, options: dict[str, Any] | None = None,
@@ -322,6 +544,39 @@ class Store:
             c.execute(f"UPDATE jobs SET {cols} WHERE id = ?",  # noqa: S608
                       (*fields.values(), job_id))
 
+    def delete_job(self, job_id: int) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
+    # ---------------------------------------------------------------- settings
+    def presets(self) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM asr_presets ORDER BY name").fetchall()
+        return [{"id": r["id"], "name": r["name"], "options": json.loads(r["options"]),
+                 "is_default": bool(r["is_default"])} for r in rows]
+
+    def save_preset(self, name: str, options: dict[str, Any], preset_id: int | None = None,
+                    ) -> int:
+        """New preset, or replace name and options of ``preset_id``. Raises
+        sqlite3.IntegrityError if the name is taken."""
+        with self._conn() as c:
+            if preset_id is None:
+                cur = c.execute("INSERT INTO asr_presets (name, options) VALUES (?, ?)",
+                                (name, json.dumps(options)))
+                return int(cur.lastrowid)
+            c.execute("UPDATE asr_presets SET name = ?, options = ? WHERE id = ?",
+                      (name, json.dumps(options), preset_id))
+        return preset_id
+
+    def delete_preset(self, preset_id: int) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM asr_presets WHERE id = ?", (preset_id,))
+
+    def set_default_preset(self, preset_id: int | None) -> None:
+        """``None``: the built-in settings are the default again."""
+        with self._conn() as c:
+            c.execute("UPDATE asr_presets SET is_default = (id IS ?)", (preset_id,))
+
     def requeue_interrupted_jobs(self) -> None:
         """Jobs that were running when the server stopped continue (their finished steps
         are cached, so little work is repeated)."""
@@ -329,17 +584,89 @@ class Store:
             c.execute("UPDATE jobs SET status = 'queued', stage = '', progress = 0 "
                       "WHERE status = 'running'")
 
-    def delete_decisions(self, interview_id: str) -> None:
+    # ---------------------------------------------------------------- inserted paragraphs
+    def inserts(self, interview_id: str) -> list[dict[str, Any]]:
         with self._conn() as c:
-            c.execute("DELETE FROM question_marks WHERE interview_id = ?", (interview_id,))
-            c.execute("DELETE FROM answer_links WHERE interview_id = ?", (interview_id,))
+            rows = c.execute('SELECT id, at, speaker, start, "end", text FROM inserted_turns '
+                             "WHERE interview_id = ? ORDER BY at", (interview_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    @staticmethod
+    def _shift(c: sqlite3.Connection, interview_id: str, first: int, delta: int) -> None:
+        """Move every stored position from turn ``first`` on by ``delta``. Two steps, because
+        the keys may not collide on the way."""
+        big = 1_000_000
+        for table in TURN_TABLES:
+            c.execute(f"UPDATE {table} SET turn = turn + ? WHERE interview_id = ? "  # noqa: S608
+                      "AND turn >= ?", (big, interview_id, first))
+            c.execute(f"UPDATE {table} SET turn = turn - ? + ? WHERE interview_id = ? "  # noqa: S608
+                      "AND turn >= ?", (big, delta, interview_id, big))
+        c.execute("UPDATE inserted_turns SET at = at + ? WHERE interview_id = ? AND at >= ?",
+                  (delta, interview_id, first))
+
+    def add_insert(self, interview_id: str, at: int, speaker: str, start: float, end: float,
+                   text: str) -> int:
+        """A paragraph at position ``at``; the turns from there on move one place down, and
+        so do the corrections, markings and extracts that refer to them."""
+        with self._conn() as c:
+            self._shift(c, interview_id, at, 1)
+            cur = c.execute('INSERT INTO inserted_turns (interview_id, at, speaker, start, "end", '
+                            "text, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (interview_id, at, speaker, start, end, text, _now()))
+        return int(cur.lastrowid)
+
+    def turn_has_markings(self, interview_id: str, turn: int) -> bool:
+        with self._conn() as c:
+            return any(c.execute(f"SELECT 1 FROM {t} WHERE interview_id = ? AND turn = ? "  # noqa: S608
+                                 "LIMIT 1", (interview_id, turn)).fetchone()
+                       for t in TURN_TABLES)
+
+    def _wipe_turn(self, c: sqlite3.Connection, interview_id: str, turn: int) -> None:
+        for table in TURN_TABLES:
+            c.execute(f"DELETE FROM {table} WHERE interview_id = ? AND turn = ?",  # noqa: S608
+                      (interview_id, turn))
+
+    def update_insert(self, interview_id: str, insert_id: int, fields: dict[str, Any],
+                      new_words: bool) -> None:
+        """Change a paragraph. ``new_words``: its text changed, so the markings on its
+        words (positions inside it) no longer fit and are removed."""
+        allowed = {"speaker", "start", "end", "text"}
+        assert set(fields) <= allowed, fields
+        with self._conn() as c:
+            row = c.execute("SELECT at FROM inserted_turns WHERE id = ? AND interview_id = ?",
+                            (insert_id, interview_id)).fetchone()
+            if row is None:
+                return
+            if new_words:
+                self._wipe_turn(c, interview_id, row["at"])
+            cols = ", ".join(f'"{k}" = ?' for k in fields)  # keys checked against the allow-list
+            c.execute(f"UPDATE inserted_turns SET {cols}, updated_at = ? WHERE id = ?",  # noqa: S608
+                      (*fields.values(), _now(), insert_id))
+
+    def delete_insert(self, interview_id: str, insert_id: int) -> None:
+        """Remove a paragraph with everything marked in it; later turns move up again."""
+        with self._conn() as c:
+            row = c.execute("SELECT at FROM inserted_turns WHERE id = ? AND interview_id = ?",
+                            (insert_id, interview_id)).fetchone()
+            if row is None:
+                return
+            self._wipe_turn(c, interview_id, row["at"])
+            c.execute("DELETE FROM inserted_turns WHERE id = ?", (insert_id,))
+            self._shift(c, interview_id, row["at"] + 1, -1)
+
+    def delete_decisions(self, interview_id: str) -> None:
+        """Everything tied to word positions. Needed after a new transcription."""
+        with self._conn() as c:
+            for table in DECISION_TABLES:
+                c.execute(f"DELETE FROM {table} WHERE interview_id = ?",  # noqa: S608 – constants
+                          (interview_id,))
+            c.execute("UPDATE interviews SET reviewed_at = NULL WHERE id = ?", (interview_id,))
 
     def delete_interview(self, interview_id: str) -> None:
         """Remove all review decisions and jobs of an interview (files: see the caller)."""
         with self._conn() as c:
-            for table, col in (("question_marks", "interview_id"),
-                               ("audio_parts", "interview_id"),
-                               ("answer_links", "interview_id"), ("jobs", "interview_id"),
-                               ("interviews", "id")):
+            for table, col in ((*((t, "interview_id") for t in DECISION_TABLES),
+                                ("audio_parts", "interview_id"), ("jobs", "interview_id"),
+                                ("interviews", "id"))):
                 c.execute(f"DELETE FROM {table} WHERE {col} = ?",  # noqa: S608 – constants
                           (interview_id,))

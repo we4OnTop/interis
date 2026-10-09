@@ -1,15 +1,15 @@
-import { CheckIcon, CornerUpRightIcon, FileTextIcon, PauseIcon, PlayIcon, Trash2Icon, XIcon } from "lucide-react";
+import { CheckIcon, CornerUpRightIcon, FileTextIcon, GripVerticalIcon, PauseIcon, PlayIcon, Trash2Icon, XIcon } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { api, type Cell, type CellStatus, type DialogueTurn, type Link, type Suggestion } from "@/lib/api";
+import { api, type Cell, type CellStatus, type DialogueTurn, type GuideQuestion, type Link, type Suggestion } from "@/lib/api";
 import { useFeedback } from "@/lib/feedback";
-import { LINK_LABEL, STATUS_LABEL, STATUS_SHORT, stamp, tagText } from "@/lib/format";
+import { LINK_LABEL, REASON_LABEL, STATUS_LABEL, stamp, tagText } from "@/lib/format";
 import { usePlayer, usePlayerState } from "@/lib/player";
 import { useProject } from "@/lib/project";
-import { useReview } from "@/lib/review";
+import { dragStart, useReview } from "@/lib/review";
 import { href } from "@/lib/router";
 import { cn } from "@/lib/utils";
 
@@ -55,11 +55,28 @@ const STATUS_STYLE: Record<CellStatus, string> = {
   asked: "bg-question-soft text-question",
   answered_elsewhere: "bg-linked-soft text-linked",
   omitted: "bg-linked-soft text-linked",
-  missing: "bg-muted text-muted-foreground",
+  explained: "bg-muted text-muted-foreground",
+  skipped: "bg-muted text-muted-foreground",
+  missing: "bg-suggest-soft text-suggest",
 };
 
-export function StatusBadge({ status, short = false }: { status: CellStatus; short?: boolean }) {
-  return <Badge className={cn("border-transparent", STATUS_STYLE[status])}>{short ? STATUS_SHORT[status] : STATUS_LABEL[status]}</Badge>;
+export function StatusBadge({ status }: { status: CellStatus }) {
+  return <Badge className={cn("border-transparent", STATUS_STYLE[status])}>{STATUS_LABEL[status]}</Badge>;
+}
+
+/** Tags ("optional", "Nebenfrage") and the interviewer note of a guide question. */
+export function QuestionMeta({ q }: { q: GuideQuestion }) {
+  if (!q.tags?.length && !q.hint) return null;
+  return (
+    <p className="text-muted-foreground mt-1 flex flex-wrap items-center gap-1 text-xs">
+      {q.tags?.map((t) => (
+        <Badge key={t} variant="outline" className="px-1.5 py-0 text-[11px]">
+          {t}
+        </Badge>
+      ))}
+      {q.hint && <span className="italic">{q.hint}</span>}
+    </p>
+  );
 }
 
 /** Small coloured square for the question × interview overview. */
@@ -68,6 +85,8 @@ export function StatusDot({ status, className }: { status: CellStatus; className
     asked: "bg-question",
     answered_elsewhere: "bg-linked",
     omitted: "bg-linked ring-2 ring-linked/30",
+    explained: "bg-muted-foreground/50",
+    skipped: "bg-muted-foreground/25",
     missing: "bg-transparent border border-dashed border-muted-foreground/50",
   };
   return <span className={cn("inline-block size-2.5 shrink-0 rounded-[3px]", style[status], className)} />;
@@ -103,11 +122,15 @@ export function Dialogue({ id, code, turns }: { id: string; code: string | null;
                 p.question ? (
                   <span key={i}>
                     <button
+                      draggable
                       className={cn(
-                        "mr-1 cursor-pointer rounded px-1 py-px align-baseline text-[11px] font-semibold",
+                        "mr-1 cursor-grab rounded px-1 py-px align-baseline text-[11px] font-semibold",
                         p.match === "followup" || !p.code ? "bg-muted text-muted-foreground" : "bg-question text-white",
                       )}
-                      title="Zuordnung ändern"
+                      title="Zuordnung ändern (ziehbar auf eine Leitfadenfrage)"
+                      onDragStart={(e) =>
+                        dragStart(e, { kind: "question", interview: id, turn: p.turn!, first: p.first!, last: p.last! })
+                      }
                       onClick={() =>
                         review.editQuestion(id, {
                           turn: p.turn!,
@@ -129,24 +152,38 @@ export function Dialogue({ id, code, turns }: { id: string; code: string | null;
                 ),
               )}
             </div>
-            <div className="flex shrink-0 items-start opacity-0 transition-opacity group-hover:opacity-100">
+            <div className="flex shrink-0 items-start opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
               {!isInterviewer && (
-                <Hint text="Diese Antwort beantwortet auch eine andere Frage …">
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    className="text-muted-foreground hover:text-linked"
-                    onClick={() =>
-                      review.linkAnswer(
-                        id,
-                        { turn: t.turn, first: 0, last: t.n_words - 1, text: t.pieces.map((p) => p.text).join(" ") },
-                        { excludeCode: code },
-                      )
-                    }
-                  >
-                    <CornerUpRightIcon />
-                  </Button>
-                </Hint>
+                <>
+                  <Hint text="Ziehen: auf eine Leitfadenfrage legen (Antwort darauf)">
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      draggable
+                      aria-label="Antwort ziehen"
+                      className="text-muted-foreground hover:text-linked cursor-grab"
+                      onDragStart={(e) => dragStart(e, { kind: "answer", interview: id, turn: t.turn, first: 0, last: t.n_words - 1 })}
+                    >
+                      <GripVerticalIcon />
+                    </Button>
+                  </Hint>
+                  <Hint text="Diese Antwort beantwortet auch eine andere Frage …">
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      className="text-muted-foreground hover:text-linked"
+                      onClick={() =>
+                        review.linkAnswer(
+                          id,
+                          { turn: t.turn, first: 0, last: t.n_words - 1, text: t.pieces.map((p) => p.text).join(" ") },
+                          { excludeCode: code },
+                        )
+                      }
+                    >
+                      <CornerUpRightIcon />
+                    </Button>
+                  </Hint>
+                </>
               )}
               <OpenInTranscript id={id} turn={t.turn} />
             </div>
@@ -235,7 +272,7 @@ export function SuggestionItem({ id, code, s, onChanged }: { id: string; code: s
             <CheckIcon />
           </Button>
         </Hint>
-        <Hint text="Verwerfen">
+        <Hint text="Verwerfen (endgültig, nicht rückgängig)">
           <Button variant="ghost" size="icon-xs" className="hover:text-destructive" onClick={() => decide("rejected")}>
             <XIcon />
           </Button>
@@ -261,6 +298,7 @@ export function CellContent({
   showSuggestions: boolean;
   onChanged: () => void;
 }) {
+  const review = useReview();
   return (
     <div className="space-y-3">
       {cell.exchanges.map((ex, i) => (
@@ -287,9 +325,21 @@ export function CellContent({
         </div>
       )}
       {!cell.exchanges.length && !cell.links.length && (
-        <p className="text-muted-foreground text-xs">
-          Nicht gestellt. Falls die Antwort woanders steckt: im Transkript markieren → „Antwort auf Frage …“.
-        </p>
+        <div className="space-y-1.5">
+          {cell.decision ? (
+            <p className="text-sm">
+              <span className="font-medium">{REASON_LABEL[cell.decision.reason]}</span>
+              {cell.decision.note && <span className="text-muted-foreground"> – {cell.decision.note}</span>}
+            </p>
+          ) : (
+            <p className="text-muted-foreground text-xs">
+              Keine Antwort erfasst. Falls die Antwort woanders steckt: im Transkript markieren → „Antwort auf Frage …“.
+            </p>
+          )}
+          <Button variant="outline" size="sm" onClick={() => review.decide(id, code, cell.decision)}>
+            {cell.decision ? "Begründung ändern" : "Begründen"}
+          </Button>
+        </div>
       )}
     </div>
   );

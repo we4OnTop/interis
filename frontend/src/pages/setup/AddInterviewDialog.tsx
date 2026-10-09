@@ -7,10 +7,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { api, enc, uploadFile } from "@/lib/api";
+import { api, enc, uploadFile, type SettingsInfo } from "@/lib/api";
 import { useFeedback } from "@/lib/feedback";
-import { bytes, MODEL_LABEL } from "@/lib/format";
+import { bytes } from "@/lib/format";
 import { useProject } from "@/lib/project";
+
+import { settingsSummary } from "./TranscriptionTab";
 
 export const AUDIO_ACCEPT = "audio/*,video/*,.m4a,.mp3,.wav,.aac,.flac,.ogg,.opus,.wma,.webm,.mp4,.mov,.mkv,.avi,.3gp,.amr";
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/;
@@ -32,7 +34,10 @@ export function AddInterviewDialog({ open, onOpenChange }: { open: boolean; onOp
   const { notify, fail } = useFeedback();
   const [id, setId] = useState("");
   const [files, setFiles] = useState<File[]>([]);
-  const [model, setModel] = useState("whisper-large-v3");
+  const [settings, setSettings] = useState<SettingsInfo | null>(null);
+  const [preset, setPreset] = useState("builtin");
+  const picked = settings?.presets.find((p) => String(p.id) === preset);
+  const chosen = settings && { ...settings.builtin, ...(picked?.options ?? {}) };
   const [progress, setProgress] = useState<number | null>(null);
   const [current, setCurrent] = useState(0);
   const input = useRef<HTMLInputElement>(null);
@@ -42,7 +47,12 @@ export function AddInterviewDialog({ open, onOpenChange }: { open: boolean; onOp
       setId(detail?.next_id ?? "I01");
       setFiles([]);
       setProgress(null);
+      api<SettingsInfo>("GET", "/api/transcription/settings").then((s) => {
+        setSettings(s);
+        setPreset(String(s.presets.find((p) => p.is_default)?.id ?? "builtin"));
+      }, fail);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, detail?.next_id]);
 
   const move = (i: number, d: number) =>
@@ -63,7 +73,7 @@ export function AddInterviewDialog({ open, onOpenChange }: { open: boolean; onOp
         setProgress(x);
         setCurrent(i);
       });
-      await api("POST", `/api/interviews/${enc(id)}/transcribe`, { model });
+      await api("POST", `/api/interviews/${enc(id)}/transcribe`, { settings: chosen, preset: picked?.name ?? "Standard" });
       notify(`${id}: ${files.length > 1 ? `${files.length} Teile hochgeladen` : "hochgeladen"} – Transkription eingereiht`);
       onOpenChange(false);
     } catch (e) {
@@ -154,22 +164,23 @@ export function AddInterviewDialog({ open, onOpenChange }: { open: boolean; onOp
           </div>
 
           <div className="grid gap-2">
-            <Label>Genauigkeit</Label>
-            <Select value={model} onValueChange={setModel} disabled={busy}>
+            <Label>Transkriptions-Einstellung</Label>
+            <Select value={preset} onValueChange={setPreset} disabled={busy || !settings}>
               <SelectTrigger className="w-72">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {(detail?.models ?? []).map((m) => (
-                  <SelectItem key={m} value={m}>
-                    {MODEL_LABEL[m] ?? m}
+                <SelectItem value="builtin">Standard (eingebaut)</SelectItem>
+                {settings?.presets.map((p) => (
+                  <SelectItem key={p.id} value={String(p.id)}>
+                    {p.name}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
             <p className="text-muted-foreground text-xs">
-              Dauer: etwa 35–40 s pro Audiominute auf dem Entwicklungs-PC, auf dem Laptop etwa doppelt so lang. Die Transkription läuft im
-              Hintergrund weiter, auch wenn du das Fenster schließt.
+              {chosen ? settingsSummary(chosen) : ""} – Einstellungen und Probelauf im Reiter „Transkription“. Dauer: etwa 35–40 s pro
+              Audiominute auf dem Entwicklungs-PC; läuft im Hintergrund weiter, auch wenn du das Fenster schließt.
             </p>
           </div>
 

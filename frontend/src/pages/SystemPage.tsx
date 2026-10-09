@@ -84,7 +84,7 @@ export function SystemPage() {
     );
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6 p-6 pb-24">
+    <div className="mx-auto max-w-4xl space-y-6 p-4 sm:p-6 pb-24">
       <h1 className="text-2xl font-semibold tracking-tight">System</h1>
 
       <Card className="gap-4">

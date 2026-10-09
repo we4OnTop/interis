@@ -29,7 +29,12 @@ Set-Location $repo
 function Step($text) { Write-Host "`n== $text" -ForegroundColor Cyan }
 function Check($what) { if ($LASTEXITCODE -ne 0) { throw "$what failed ($LASTEXITCODE)" } }
 
-$Out = [IO.Path]::GetFullPath((Join-Path $repo $Out))
+$Out = [IO.Path]::GetFullPath((Join-Path $repo $Out)).TrimEnd('\')
+# The build deletes $Out first: never the repository, a parent of it, or a drive root.
+if ($Out -eq $repo.TrimEnd('\') -or $repo.StartsWith($Out + '\', [StringComparison]::OrdinalIgnoreCase) `
+    -or $Out -eq [IO.Path]::GetPathRoot($Out).TrimEnd('\')) {
+    throw "Refusing to build into $Out: the build deletes that folder. Use a folder such as build\Interis."
+}
 $work = Join-Path $repo 'build\work'
 if (Test-Path $Out) { Remove-Item -Recurse -Force $Out }
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }

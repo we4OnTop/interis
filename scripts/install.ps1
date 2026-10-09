@@ -4,22 +4,21 @@
 
 .DESCRIPTION
   1. checks that uv is installed
-  2. installs the exact, locked Python environment (uv sync --locked)
+  2. installs the exact, locked Python environment without the dev tools (uv sync --locked --no-dev)
   3. sets INTERIS_DATA_DIR permanently for your user (your encrypted data folder)
   4. optionally copies already prepared models from another PC (USB stick) – saves ~8 GB
      download and the conversion time; they are verified by hash before every use
-  5. downloads / verifies the models (the only step that uses the internet)
+  5. downloads / verifies the models (steps 2 and 5 are the only ones that use the internet)
   6. tells you how to block internet access for Interis and runs the self-check
 
 .EXAMPLE
   .\scripts\install.ps1 -DataDir X:\interis-data
   .\scripts\install.ps1 -DataDir X:\interis-data -ModelsFrom E:\interis-models
-  .\scripts\install.ps1 -DataDir X:\interis-data -UseSystemCerts -AllowVerifiedMirror
+  .\scripts\install.ps1 -DataDir X:\interis-data -AllowVerifiedMirror
 #>
 param(
     [Parameter(Mandatory = $true)][string]$DataDir,
     [string]$ModelsFrom,
-    [switch]$UseSystemCerts,
     [switch]$AllowVerifiedMirror
 )
 
@@ -41,7 +40,7 @@ uv --version
 
 # 2. environment
 Step 'Installing the locked Python environment (this can take a few minutes)'
-uv sync --locked
+uv sync --locked --no-dev
 if ($LASTEXITCODE -ne 0) { throw 'uv sync failed' }
 
 # 3. data directory
@@ -79,13 +78,13 @@ if ($ModelsFrom) {
 # 5. models (verifies copied ones, downloads missing ones)
 Step 'Models (verifying / downloading)'
 $args = @('run', 'interis', 'setup-models')
-if ($UseSystemCerts) { $args += '--use-system-certs' }
 if ($AllowVerifiedMirror) { $args += '--allow-verified-mirror' }
 & uv @args
 if ($LASTEXITCODE -ne 0) {
     Write-Host @'
 Model setup did not finish. Common causes:
-  * "CERTIFICATE_VERIFY_FAILED": an antivirus scans HTTPS -> add -UseSystemCerts
+  * "CERTIFICATE_VERIFY_FAILED": an antivirus scans HTTPS -> set $env:SSL_CERT_FILE to its
+    exported root certificate (PEM), or copy the models from another PC with -ModelsFrom
   * pyannote "gated model": set $env:HF_TOKEN (see README) or add -AllowVerifiedMirror
 '@ -ForegroundColor Yellow
     exit 1

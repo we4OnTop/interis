@@ -11,6 +11,7 @@ The method and all scores are stored, and the result can always be corrected by 
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,8 +34,18 @@ def _cos(a: np.ndarray, b: np.ndarray) -> float:
     return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
 
 
-def voice_embedding(audio: np.ndarray, pyannote_dir: Path) -> np.ndarray:
-    """Embedding of a whole enrollment recording with community-1's embedding model."""
+VOICE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
+
+
+def voice_file(voices: Path, label: str) -> Path:
+    """File of a profile. The label becomes a file name, so it is strictly validated."""
+    if not VOICE_LABEL.match(label):
+        raise ValueError("profile name: letters, digits, - and _ only (max. 40)")
+    return voices / f"{label}.json"
+
+
+def voice_embedder(pyannote_dir: Path):
+    """community-1's speaker embedding model, as a function: 16 kHz audio -> vector."""
     require_offline()
     ckpt = pyannote_dir / "embedding" / "pytorch_model.bin"
     assert_safe_checkpoint(ckpt)
@@ -43,22 +54,68 @@ def voice_embedding(audio: np.ndarray, pyannote_dir: Path) -> np.ndarray:
 
     model = Model.from_pretrained(pyannote_dir / "embedding")
     inference = Inference(model, window="whole")
-    waveform = torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32)).unsqueeze(0)
-    return np.asarray(inference({"waveform": waveform, "sample_rate": 16000})).ravel()
+
+    def embed(audio: np.ndarray) -> np.ndarray:
+        waveform = torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32)).unsqueeze(0)
+        return np.asarray(inference({"waveform": waveform, "sample_rate": 16000})).ravel()
+
+    return embed
 
 
-def save_voice(path: Path, label: str, embedding: np.ndarray, model_revision: str) -> None:
+def voice_embedding(audio: np.ndarray, pyannote_dir: Path) -> np.ndarray:
+    """Embedding of a whole enrollment recording with community-1's embedding model."""
+    return voice_embedder(pyannote_dir)(audio)
+
+
+def save_voice(path: Path, label: str, embedding: np.ndarray, model_revision: str,
+               **info: Any) -> None:
+    """``info``: optional statistics kept with the profile (``seconds``, ``n_segments``,
+    ``sources``, ``created_at``, ``updated_at``) – never anything but numbers and names."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "label": label,
-        "embedding": [float(x) for x in embedding],
-        "model_revision": model_revision,
-        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
-    }), encoding="utf-8")
+    body = {"label": label, "embedding": [float(x) for x in embedding],
+            "model_revision": model_revision,
+            "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            **{k: v for k, v in info.items() if v is not None}}
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(body), encoding="utf-8")
+    tmp.replace(path)
+
+
+def merge_voice(old: dict[str, Any] | None, learned: dict[str, Any], source: str,
+                model_revision: str) -> dict[str, Any]:
+    """Refine a profile with one more corrected stretch instead of replacing it: the
+    embeddings are averaged, weighted by the seconds of speech behind each. A profile made
+    with another embedding model cannot be refined and is replaced."""
+    new = {"embedding": np.asarray(learned["embedding"], dtype=float),
+           "seconds": float(learned["seconds"]), "n_segments": int(learned["n_segments"]),
+           "sources": [{"id": source, "seconds": round(float(learned["seconds"]), 1),
+                        "segments": int(learned["n_segments"])}]}
+    if not old or old.get("model_revision") != model_revision or "seconds" not in old:
+        return {**new, "created_at": None}
+    wo, wn = float(old["seconds"]), new["seconds"]
+    centre = np.asarray(old["embedding"]) / (np.linalg.norm(old["embedding"]) + 1e-12) * wo \
+        + new["embedding"] / (np.linalg.norm(new["embedding"]) + 1e-12) * wn
+    return {"embedding": centre / (np.linalg.norm(centre) + 1e-12), "seconds": wo + wn,
+            "n_segments": int(old["n_segments"]) + new["n_segments"],
+            "sources": [*old.get("sources", []), *new["sources"]][-200:],
+            "created_at": old.get("created_at")}
 
 
 def load_voice(path: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+def interviewer_by_voice(voice: dict[str, Any], speaker_embeddings: dict[str, list[float]],
+                         labels: list[str]) -> tuple[str | None, dict[str, float]]:
+    """The diarized speaker whose embedding is closest to the voice profile, if clearly so."""
+    ref = np.asarray(voice["embedding"])
+    sims = {lab: round(_cos(ref, np.asarray(speaker_embeddings[lab])), 3)
+            for lab in labels if lab in speaker_embeddings}
+    ranked = sorted(sims.items(), key=lambda kv: kv[1], reverse=True)
+    if ranked and ranked[0][1] >= VOICE_THRESHOLD and (
+            len(ranked) == 1 or ranked[0][1] - ranked[1][1] >= VOICE_MARGIN):
+        return ranked[0][0], sims
+    return None, sims
 
 
 def assign_roles(speakers: list[dict[str, Any]], sentences: list[Sentence],
@@ -73,14 +130,10 @@ def assign_roles(speakers: list[dict[str, Any]], sentences: list[Sentence],
 
     interviewer: str | None = None
     if voice and speaker_embeddings:
-        ref = np.asarray(voice["embedding"])
-        sims = {lab: round(_cos(ref, np.asarray(speaker_embeddings[lab])), 3)
-                for lab in labels if lab in speaker_embeddings}
+        interviewer, sims = interviewer_by_voice(voice, speaker_embeddings, labels)
         result["scores"]["voice_similarity"] = sims
-        ranked = sorted(sims.items(), key=lambda kv: kv[1], reverse=True)
-        if ranked and ranked[0][1] >= VOICE_THRESHOLD and (
-                len(ranked) == 1 or ranked[0][1] - ranked[1][1] >= VOICE_MARGIN):
-            interviewer, result["method"] = ranked[0][0], "voice"
+        if interviewer is not None:
+            result["method"] = "voice"
 
     per_speaker = Counter(s.speaker for s in sentences)
     q_per_speaker = Counter(c.sentence.speaker for c in candidates)

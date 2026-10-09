@@ -107,6 +107,7 @@ function JobStatus({ iv }: { iv: InterviewRow }) {
             {STAGE_LABEL[key] ?? key}
           </span>
           {j.progress > 0 && j.progress < 1 && <span className="text-muted-foreground">{Math.round(j.progress * 100)} %</span>}
+          {j.options.preset && <span className="text-muted-foreground text-xs">({j.options.preset})</span>}
           {j.started_at && (
             <span className="text-muted-foreground ml-auto text-xs">
               seit {new Date(j.started_at).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })}
@@ -117,7 +118,8 @@ function JobStatus({ iv }: { iv: InterviewRow }) {
       </div>
     );
   }
-  if (j && j.status === "failed")
+  // a failed voice assignment leaves the transcript as it was; the transcript page shows it
+  if (j && j.status === "failed" && j.kind !== "speakers")
     return (
       <div className="text-destructive flex items-start gap-1.5 text-sm" title={j.message}>
         <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
@@ -159,20 +161,19 @@ function InterviewCard({ iv }: { iv: InterviewRow }) {
   };
 
   const start = async () => {
-    const model = (j?.kind === "transcribe" && j.options.model) || "whisper-large-v3";
     try {
-      await api("POST", `/api/interviews/${enc(iv.id)}/transcribe`, { model });
+      await api("POST", `/api/interviews/${enc(iv.id)}/transcribe`, {});
       notify(`${iv.id}: Transkription eingereiht`);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409 && iv.transcribed) {
         const ok = await confirm({
           title: `${iv.id} neu transkribieren?`,
           description:
-            "Dabei entstehen neue Wortpositionen. Deine Markierungen in diesem Gespräch (Fragen-Zuordnungen, Verknüpfungen) werden deshalb entfernt.",
+            "Dabei entstehen neue Wortpositionen. Deine Arbeit an diesem Gespräch wird deshalb entfernt: Fragen-Zuordnungen, Verknüpfungen, Korrekturen, Sprecherkorrekturen, eingefügte Absätze, Glättungen, Begründungen, Extrakte und der Status „Korrektur abgeschlossen“.",
           confirm: "Neu transkribieren",
           destructive: true,
         });
-        if (ok) await run(() => api("POST", `/api/interviews/${enc(iv.id)}/transcribe`, { model, discard_markings: true }), `${iv.id}: Transkription eingereiht`);
+        if (ok) await run(() => api("POST", `/api/interviews/${enc(iv.id)}/transcribe`, { discard_markings: true }), `${iv.id}: Transkription eingereiht`);
         return;
       }
       fail(e);

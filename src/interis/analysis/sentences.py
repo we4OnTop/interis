@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 
 from interis.pipeline.types import Turn
@@ -42,7 +43,10 @@ def split_sentences(turns: list[Turn]) -> list[Sentence]:
                 words = turn.words[first:wi + 1]
                 text = "".join(w.text for w in words).strip()
                 if text:
+                    # words can be given to another speaker by hand (speaker corrections)
+                    said = Counter(w.speaker or turn.speaker for w in words if w.text.strip())
+                    speaker = said.most_common(1)[0][0] if said else turn.speaker
                     out.append(Sentence(ti, first, wi, text, words[0].start, words[-1].end,
-                                        turn.speaker))
+                                        speaker))
                 first = wi + 1
     return out

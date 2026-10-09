@@ -111,6 +111,14 @@ def save_settings(data_dir: Path, models_dir: Path | None) -> Path:
     return f
 
 
+def _refuse_network_path(value: str) -> None:
+    """Interview data must stay on the local encrypted volume: UNC shares are refused."""
+    if value.startswith(("\\\\", "//")):
+        raise ConfigError(
+            f"Netzwerkpfade werden nicht unterstützt: {value}. Bitte einen Ordner auf dem "
+            "lokalen, verschlüsselten Laufwerk verwenden.")
+
+
 def resolve_paths(cli_value: str | None, cli_models: str | None = None) -> Paths:
     settings = load_settings()
     value = cli_value or os.environ.get(DATA_DIR_ENV) or settings.get("data_dir")
@@ -120,10 +128,13 @@ def resolve_paths(cli_value: str | None, cli_models: str | None = None) -> Paths
             "It should point to a folder on your encrypted VeraCrypt volume, "
             r"e.g. X:\interis-data"
         )
+    _refuse_network_path(str(value))
     root = Path(value).expanduser().resolve()
     if not root.exists():
         raise ConfigError(f"Data directory does not exist: {root}")
     models = cli_models or os.environ.get(MODELS_DIR_ENV) or settings.get("models_dir")
+    if models:
+        _refuse_network_path(str(models))
     models_dir = Path(models).expanduser().resolve() if models else None
     if models_dir is not None and not models_dir.exists():
         raise ConfigError(f"Models directory does not exist: {models_dir}")

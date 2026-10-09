@@ -114,7 +114,7 @@ FTS5 virtual table over turn text for full-text search
 
 ```
 GET/POST        /interviews                 list / create (metadata)
-POST            /interviews/{id}/audio      upload (streamed to disk, size-limited, sniffed)
+POST            /interviews/{id}/audio      upload (streamed to disk, size-limited, extension allow-list)
 GET             /interviews/{id}/audio      range-request streaming for the player
 POST            /interviews/{id}/process    enqueue pipeline (params: model, compute_type)
 GET             /jobs?active=1              progress polling
@@ -159,8 +159,9 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
    `python.exe` (created by a setup script, verified by `interis doctor`). This also covers
    native code (CTranslate2, ONNX Runtime).
 4. Model download happens only in an explicit `interis setup-models` command. It runs
-   without the guard, uses pinned revisions, and verifies sha256 against a committed
-   manifest. The HF token is read from an env var for that one run and is never stored.
+   without the guard, uses pinned revisions, and verifies every file's sha256 against the
+   Hub (the commit must match the pinned revision, and only the official Hub is used). The HF
+   token is read from an env var for that one run and is never stored.
 
 **Supply chain (threat 2):**
 - Python: `uv` with committed `uv.lock` (hashes), `uv sync --locked`,
@@ -168,14 +169,20 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
   releases), and PyTorch only from the official CPU index, scoped to torch/torchaudio.
 - Audits: `pip-audit` + `osv-scanner` on the lockfile, before every dependency update and
   in a pre-commit/CI task.
-- Frontend: **pnpm 10** (lifecycle scripts off by default), `minimumReleaseAge: 10080`
-  (7 days), committed lockfile, `pnpm audit`, few dependencies (see DEPENDENCIES.md).
+- Frontend: **npm** with a committed `frontend/package-lock.json`, `ignore-scripts=true`
+  (no install scripts run), `save-exact=true`, `npm audit`, few dependencies (see
+  DEPENDENCIES.md). Open point: npm 10 has no release-age setting, so the 7-day cooldown
+  that applies to Python is **not** enforced for the frontend. Moving to pnpm (which has one)
+  is a decision still to be made.
 - No `trust_remote_code`. No dynamic plugin loading. No `subprocess(shell=True)`.
 
 **Model files (threat 3):**
-- torch ≥ 2.10 (fixes CVE-2025-32434 and CVE-2026-24747), with `weights_only=True` loading.
-- Models pinned by HF commit hash, file hashes in `models.lock.json`, checked at worker
-  start.
+- torch ≥ 2.10 (fixes CVE-2025-32434 and CVE-2026-24747). `weights_only=True` is used where
+  the code controls the load (the one-time wav2vec2 conversion). pyannote 4.0.7 needs
+  `weights_only=False`, so its checkpoints are loaded only after the pickle scan passes.
+- Models pinned by HF commit hash. File hashes come from the Hub at download time and are
+  stored in `models.lock.json`, which is checked at worker start. Open point: this lock travels
+  with a copied models folder, so a copy is trusted by its own lock (see DEPENDENCIES.md).
 - Pickle-only checkpoints (e.g. a `.bin` wav2vec2 model) are **converted once to
   safetensors** during setup and from then on loaded only from safetensors.
 - CTranslate2 ≥ 4.8.1 (fixes CVE-2026-102566/-102567 in its model loader).
@@ -188,11 +195,16 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
 - **Session token:** the launcher generates a random token at start and opens
   `http://127.0.0.1:8765/#login=<token>`. The page exchanges it for an
   `HttpOnly; SameSite=Strict` cookie. Every API call requires the cookie.
-- Origin/Referer check on all state-changing requests. No CORS middleware at all.
-- Security headers: `Content-Security-Policy: default-src 'self'; media-src 'self' blob:;
-  object-src 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`,
-  `Referrer-Policy: no-referrer`. The frontend loads **no** CDN scripts or web fonts.
-- Uploads: streamed, size cap, magic-byte sniffing, stored under a UUID name (the user's
+- State-changing requests must send `X-Interis: 1`; an `Origin` header, when present, must be the local origin. There is no Referer check and no CORS middleware.
+- Security headers: `Content-Security-Policy` as built in `web/base.py`: scripts only from
+  the app's own files (`script-src 'self'`); styles from the app, a fresh per-response nonce
+  (`'nonce-…'`, also written into the page's `csp-nonce` meta tag, which the UI library reads),
+  and one hash for the scrollbar style of the Radix select; no `unsafe-inline`; images from the
+  app or `data:` URIs (the favicon); `object-src 'none'`, `frame-ancestors 'none'`,
+  `form-action 'none'`. Also `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`
+  and `X-Frame-Options: DENY`. The frontend loads **no** CDN scripts or web fonts.
+  `tests/test_csp.py` pins the nonce behaviour.
+- Uploads: streamed, size cap, extension allow-list (magic-byte sniffing is not implemented), stored under a UUID name (the user's
   filename is never used as a path).
 - Interview text is rendered as text, never as HTML (no `dangerouslySetInnerHTML`).
 
@@ -215,7 +227,8 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
   never lands somewhere unintended. `HF_HOME`, `TORCH_HOME` and `TMP`/`TEMP` are redirected
   into it.
 - **Model lock** lives at `<data>/models/models.lock.json`, not in the repo, because local
-  conversions are machine-specific. Pinned revisions are in `src/interis/models.py`.
+  conversions are machine-specific. It is not a committed manifest: its hashes come from the Hub
+  when the files are downloaded. Pinned revisions are in `src/interis/models.py`.
 - **Pickle scanner** (`security/pickle_scan.py`): static allowlist check of every `.bin`
   checkpoint (wav2vec2 at setup; pyannote at setup **and before every load**, because pyannote
   4.0.7 uses `torch.load(weights_only=False)`).
@@ -245,7 +258,9 @@ DELETE          /interviews/{id}/audio      delete original audio (retention)
     sentences;
   - voice embeddings are biometric data, so they stay in `<data>/voices` and are never
     written to transcripts or exports.
-- `guide`: Markdown guide format (sections, codes, `~` variants, `>` planned probes).
+- `guide`: Markdown guide format (sections, codes, `~` variants, `>` planned probes). A question
+  without a code gets the next `F<n>` above the highest code of the guide; saving the guide in
+  the website writes these codes into the text (`label_guide`), so later edits cannot move them.
 - `analyze`: asked questions → guide matching (main / probe / follow-up), direct answers
   (main questions keep their follow-ups), and "answered elsewhere" suggestions
   (anticipated / later / unasked).
@@ -274,29 +289,180 @@ The scope is focused on what matters for the thesis:
    therefore left out);
 3. a side-by-side comparison of all interviews, synchronised per guide question.
 
-- **Frontend without npm:** plain HTML/CSS/JS in `src/interis/web/static/` (about 500
-  lines), served by FastAPI. This changes the earlier React/Vite plan. With zero
-  third-party frontend code there is no npm supply-chain risk and no Node toolchain.
-  Text is only inserted as text nodes, never as HTML.
-- **Backend:** FastAPI + uvicorn (Starlette 1.7). Decisions are stored in
-  `<data>/interis.db` (stdlib `sqlite3`): question corrections and manual marks
-  (`question_marks`), and "also answers" links with an `omitted` flag (`answer_links`).
-  Both are keyed by position (interview, turn, word range). Transcript JSONs stay untouched.
-- **Effective state** (`web/review.py`, pure functions) = machine analysis + your
-  decisions. Direct answers are recomputed after reassignments. Each link's type
-  (anticipated / later / unasked) is derived from when the question was actually asked.
-  Each cell status is one of asked / answered elsewhere / omitted / missing.
-- **Security as specified in §6:**
-  - bound to 127.0.0.1, Host allow-list;
-  - login token in the URL fragment, exchanged for an HttpOnly SameSite=Strict cookie;
-  - `X-Interis` header plus Origin check on writes;
-  - strict CSP, no API docs routes, input validation on every span and guide code.
-  - Tested in `tests/test_web.py`.
-- **Verified in a browser** with two German TTS interviews:
-  - the grid synchronises differently worded questions ("sensible Daten" → F3);
-  - linking via ↗ and via text selection works, "weggelassen – schon beantwortet" shows up;
-  - reassigning a follow-up to "F2 Nachfrage" works;
-  - audio streaming (HTTP 206) works.
+The frontend was rewritten from plain HTML/JS (the earlier `web/static/` plan no longer
+exists) to a React build. The 6c notes below describe the current state.
+
+- **Frontend:** React 19 with TypeScript, built with Vite 8 and styled with Tailwind CSS 4.
+  UI components are in `frontend/src/components/ui` (shadcn style on Radix primitives, icons
+  from lucide-react). Dependencies have exact versions in `frontend/package.json`. The build
+  (`npm run build`, i.e. `tsc -b && vite build`) writes to `src/interis/web/dist`
+  (`emptyOutDir: true`); the output is checked in. FastAPI serves `index.html` and `/assets`
+  (`web/base.py`, `secure_app`).
+- **Pages** (`frontend/src/pages/`): ProjectsPage; WorkflowPage ("Ablauf"); QuestionsPage
+  ("Pro Frage"); ColumnsPage ("Nebeneinander"); InterviewPage (transcript, modes "Lesen",
+  "Korrigieren", "Glätten"); ExtractPage ("Auswertung"); SetupPage ("Leitfaden & Gespräche",
+  tabs "Gespräche", "Leitfaden", "Einstellungen").
+- **Text rendering:** interview text is only passed to React as text nodes. No
+  `dangerouslySetInnerHTML` is used in `frontend/src`.
+- **Drag and drop** (`lib/review.tsx`, `ColumnsPage.tsx`): question chips and interviewee
+  turns are `draggable`. The payload is JSON under the type `application/x-interis` with
+  `kind` (question or answer), `interview`, `turn`, `first`, `last`. Dropping on a guide
+  question row posts to `/api/questions` (match "main") or `/api/links`; dropping on the
+  spontaneous row posts a follow-up question without a guide code. The payload names the
+  interview, so a drop cannot target another interview's column. Every drop also has a dialog
+  path; dragging is an accelerator only.
+- **Backend:** FastAPI and uvicorn. SQLite through the standard library `sqlite3`
+  (`web/store.py`, parameterised SQL) in `<data>/interis.db`. Manual question marks
+  (`question_marks`) and "also answers" links with an `omitted` flag (`answer_links`) are keyed
+  by position (interview, turn, word range). Transcript JSONs are not changed by the website.
+  Section 6d lists the tables added for the review steps.
+- **Effective state** (`web/review.py`, pure functions) = machine analysis + word edits +
+  your decisions. Direct answers are recomputed after reassignments. Each link's type
+  (anticipated / later / unasked) is derived from when the question was actually asked. Cell
+  status precedence in `interview_state`: asked > omitted > answered_elsewhere > explained >
+  missing.
+- **Security as built** (`web/base.py`, `cli.py`, `desktop.py`):
+  - the server listens on 127.0.0.1 (`cli.py`) and has a Host allow-list
+    (`TrustedHostMiddleware`);
+  - the login token is part of the URL fragment; `POST /api/login` exchanges it for an
+    HttpOnly, SameSite=Strict session cookie, and every `/api/` route requires that cookie;
+  - every non-GET request must send `X-Interis: 1`. If an `Origin` header is sent, it must be
+    the local origin. There is no CORS middleware;
+  - a Content-Security-Policy and the headers nosniff, no-referrer and frame-deny are set;
+    API docs routes are disabled;
+  - every write checks spans against the transcript and guide codes against the guide
+    (422 otherwise), and request fields have length limits (pydantic).
+- **Tests:** `tests/test_web.py`, `tests/test_workflow_api.py`, `tests/test_edits.py`,
+  `tests/test_web_dist.py` (referenced files of the built UI exist).
+- **Browser check of the earlier build:** two German TTS interviews were checked in a browser
+  for the side-by-side grid (differently worded questions are synchronised, e.g. "sensible
+  Daten" to F3), linking via the arrow button and via text selection, the "weggelassen -
+  schon beantwortet" status, reassigning a follow-up to "F2 Nachfrage", and audio streaming
+  (HTTP 206). The transcript edits, the workflow page, the decisions on missing questions, the
+  extracts and the exports are not covered by such a browser check in this document.
+
+## 6d. Transcript edits, workflow and extracts (as built)
+
+These are the review steps between transcription and export (the researcher's view is in
+docs/ABLAUF.md). Modules: `web/edits.py` (pure edit logic), `web/review.py` (effective state),
+`web/workflow.py` (steps and done rules), `web/extracts.py` (extract table and exports),
+`web/store.py` (SQLite), `web/app.py` (routes), `web/jobs.py` and `cli.py` (analysis with edits).
+
+### Edit overlay on the immutable transcript
+
+- The raw transcript JSON (`<data>/exports/<ID>/<ID>.json`) is not changed by the website.
+  Edits are rows in `word_edits`, keyed by (interview, turn, word).
+- `apply_edits(raw, edits)` returns an effective copy in memory. Word indices never move. A
+  deleted word keeps its timing and gets empty text. A replace span puts the new text into its
+  first word and deletes the other words of the span.
+- Question marks, answer links, decisions and extracts address words by position, so they stay
+  valid after edits. Passages are recomputed from the effective words (`review.passage`).
+- Views and exports use the effective text. In `GET /api/interviews/{id}` a changed word carries
+  `o` (original text), `k` (kind) and, for smoothing, `g` (tag).
+- A correction has no tag. A smoothing edit needs a tag from the project's effective tag list
+  (`project_tags(smoothing_tags)`; defaults in `DEFAULT_TAGS`). Replacement text is limited to
+  200 characters (`MAX_TEXT_LEN`), tags to 40 (`MAX_TAG_LEN`).
+
+### Analysis digest and re-analysis
+
+- `edits_digest(edits)` is a SHA-256 over the sorted edit rows. The analysis stores it as
+  `analysis["edits_digest"]`. `edits_stale` is true when the current digest differs
+  (`EMPTY_DIGEST` when there are no edits). The UI shows this as "Analyse veraltet".
+- Saving an edit does not queue an analysis. `POST /api/interviews/{id}/analyze` queues one
+  analysis job. A queued analysis of the interview is not queued twice; a running one does not
+  block a new one, because it read the edits before they changed (`_queue_analysis`).
+- For an analyze job with edits, `jobs.py` writes the rows to `<data>/tmp/edits-<job>.json`,
+  passes `--edits`, and removes the file in a `finally` block. `cmd_analyze` in `cli.py` runs the
+  analysis on `apply_edits(raw, edits)` and writes back only the analysis block plus the digest.
+  The raw words are unchanged.
+- Until the next analysis, the displayed text is current, but question detection, guide matches
+  and suggestions come from the last analysis.
+
+### Reviewed flag and re-transcription
+
+- "Korrektur abgeschlossen" is stored as `interviews.reviewed_at` (`PUT
+  /api/interviews/{id}/reviewed`). The flag does not check the text.
+- Starting a transcription for an interview that already has markings returns 409 unless
+  `discard_markings` is set. The markings stay until the new transcript exists: a transcribe job
+  that exits with code 0 calls `store.delete_decisions` (every table in `DECISION_TABLES` and
+  `reviewed_at`). A cancelled or failed job keeps them. `cmd_transcribe` clears them as well when
+  it writes a new transcript, so the command line cannot leave old positions behind.
+- Every write keyed by word position (edits, question marks and their reset, links, extracts,
+  decisions, "Korrektur abgeschlossen") is refused (409, `_not_transcribing`) while a transcribe
+  job of that interview is queued or running. The check and the write run under one lock
+  (`write_lock` in `create_app`), which also covers the analysis queue and the start of a
+  transcription.
+- A word carries one kind of edit. A span that holds an edit of the other kind is refused (409,
+  "erst zurücknehmen"); the same kind overwrites the word's edit.
+
+### Decisions on guide questions
+
+- `question_decisions` holds the reason (`not_asked`, `not_relevant`, `other`) and a note of up
+  to 2000 characters. `PUT /api/interviews/{id}/questions/{code}/decision` sets it; `reason: null`
+  deletes it. An unknown guide code returns 422.
+- In `interview_state` a cell gets status `explained` when there is neither an asked question
+  nor a confirmed link, but a decision exists. Decisions in `GET /api/interviews/{id}` carry
+  `in_guide`; a decision for a code the guide no longer has is kept, but no cell shows it.
+- Cell status precedence (`interview_state`): asked > omitted > answered_elsewhere > explained >
+  missing. An omitted link therefore shows "omitted" even when another confirmed link exists.
+
+### Workflow state
+
+- `GET /api/projects/{pid}/workflow` returns the eight `steps` (`STEPS` in `web/workflow.py`,
+  with the German texts) and one row per interview.
+- Done rules (`interview_row`): transcribe = transcribed; correct = reviewed; smooth = at least
+  one smoothing edit (informational, never blocks); assign = transcribed and no question left
+  unmatched (computed by the server, but the "Ablauf" page shows counts instead of a check);
+  explain = transcribed, the guide has at least one question and no guide question is missing;
+  extract = at least one extract of a guide code that the guide still has, on a span of the
+  effective transcript (the same rows the extract list shows).
+
+### Extracts and exports
+
+- Table `extracts` (id, interview, guide code, span, paraphrase, updated_at). The paraphrase is
+  required (non-empty, at most 2000 characters). The span is checked against the transcript.
+- `GET /api/projects/{pid}/extracts` returns the effective passage text and the start and end
+  times of the effective transcript. Each row carries `in_guide`; the export keeps every row,
+  also those whose guide code was removed from the guide (their question column is empty).
+- `GET /api/projects/{pid}/extracts/export?format=docx|csv` builds the file in memory (python-docx
+  for DOCX, the `csv` module for CSV) and returns it with `Content-Disposition: attachment`.
+  Nothing is written to disk. Columns: Gespräch, Frage, Leitfadenfrage, Kernaussage, Zitat, Zeit.
+  CSV: UTF-8 with BOM, `;` as delimiter, CRLF line ends. In CSV, a cell starting with `=`, `+`,
+  `-`, `@`, tab or CR gets a leading apostrophe (`safe_cell`). Characters that XML 1.0 cannot
+  carry are removed from both formats (`xml_safe`).
+- The transcript JSON and the Word and text exports are written through a temporary file that
+  replaces the old one (`_replace_file`), so an interrupted write never leaves a half file.
+
+### Tables and columns added
+
+| Name | Purpose |
+|---|---|
+| `word_edits` | one row per edited word: action (replace or delete), kind, text, tag |
+| `extracts` | a passage with the researcher's paraphrase, assigned to a guide question |
+| `question_decisions` | reason and note for a guide question without an answer |
+| `interviews.reviewed_at` | time of "Korrektur abgeschlossen"; NULL means open |
+| `projects.smoothing_tags` | newline-separated tags; empty means the defaults |
+
+### Endpoints added or changed
+
+All under `/api`. Every non-GET request needs the `X-Interis: 1` header and the session cookie.
+
+| Method and path | Purpose |
+|---|---|
+| `GET /api/interviews/{id}` | changed: effective text, `o`/`k`/`g` on changed words, `reviewed`, `edits_stale`, `decisions`, `edits`; `links` carry the passage fields |
+| `GET /api/projects/{pid}/compare` | changed: cells use the effective text; `edits_stale` per interview |
+| `PATCH /api/projects/{pid}` | accepts `smoothing_tags`; `GET /api/projects/{pid}` returns `tags` |
+| `POST /api/interviews/{id}/edits` | replace or delete a word span (correction or smoothing) |
+| `POST /api/interviews/{id}/edits/revert` | remove the edits in a span |
+| `PUT /api/interviews/{id}/reviewed` | set or clear "Korrektur abgeschlossen" |
+| `POST /api/interviews/{id}/analyze` | queue one analysis job |
+| `PUT /api/interviews/{id}/questions/{code}/decision` | set or delete the reason for a guide question |
+| `GET /api/projects/{pid}/workflow` | steps and progress per interview |
+| `GET /api/projects/{pid}/extracts` | extracts of the project |
+| `POST /api/extracts` | create an extract |
+| `PATCH /api/extracts/{id}` | change the paraphrase |
+| `DELETE /api/extracts/{id}` | delete an extract |
+| `GET /api/projects/{pid}/extracts/export?format=docx\|csv` | export file, generated in memory |
 
 ## 7. Repository layout
 
@@ -314,7 +480,7 @@ interis/
     api/     app.py security.py routers/*.py
     worker/  runner.py
     export/  json_export.py docx_export.py xlsx_export.py   (qda/ later)
-  web/       package.json pnpm-lock.yaml .npmrc src/ (React + TS)
+  web/       package.json package-lock.json .npmrc src/ (React + TS)
   tests/     unit/ pipeline/ (short German sample) api/ security/ (guard, host, csrf)
   scripts/   firewall.ps1  create-container.md
 ```

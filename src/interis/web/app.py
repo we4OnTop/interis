@@ -15,43 +15,82 @@ Security (see ARCHITECTURE.md §6):
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
 import shutil
+import threading
+import unicodedata
+import zipfile
+from collections import Counter
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import AfterValidator, BaseModel, Field
 
 from interis.analysis.guide import (
     Guide,
     GuideError,
-    GuideQuestion,
     docx_to_guide_text,
+    label_guide,
     load_guide,
     parse_guide,
+    typst_to_guide_text,
 )
 from interis.config import Paths
 from interis.models import ASR_MODELS
 from interis.pipeline.cache import combined_sha
+from interis.pipeline.peaks import peaks_file
 from interis.pipeline.types import Transcript
+from interis.web import extracts as export
 from interis.web.base import secure_app
+from interis.web.edits import (
+    MAX_INSERT_CHARS,
+    MAX_INSERT_WORDS,
+    MAX_INSERTS,
+    MAX_TAG_LEN,
+    MAX_TAGS,
+    MAX_TEXT_LEN,
+    apply_edits,
+    edited_words,
+    parse_tags,
+    project_tags,
+    with_inserts,
+)
 from interis.web.jobs import JobRunner, guide_path_for
-from interis.web.review import guide_mismatch, interview_state, interviewer_of
+from interis.web.review import (
+    edits_stale,
+    guide_mismatch,
+    interview_state,
+    interviewer_of,
+    passage,
+)
 from interis.web.store import Store
 from interis.web.system import add_system_routes
+from interis.web.transcription import (
+    SHA256_HEX,
+    TranscriptionSettings,
+    add_transcription_routes,
+    default_settings,
+    remove_trials,
+)
+from interis.web.workflow import workflow_state
 
 INTERVIEW_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$")
 AUDIO_EXT = {"m4a", "mp3", "wav", "aac", "flac", "ogg", "opus", "wma", "webm", "mp4", "mov",
              "mkv", "avi", "3gp", "amr"}
 MAX_AUDIO_BYTES = 8 * 1024**3
 MAX_DOCX_BYTES = 20 * 1024**2
+# A .docx is a zip: its parts must stay small after decompression too (zip bomb).
+MAX_DOCX_UNPACKED = 50 * 1024**2
 MAX_GUIDE_CHARS = 200_000
 LEGACY_PROJECT = "Bestehende Interviews"
+VOICE = "interviewer"  # the voice profile `interis enroll` and the role detection use
 
 
 class Span(BaseModel):
@@ -77,8 +116,9 @@ class LinkCreate(Span):
     guide_code: str = Field(max_length=40)
     status: Literal["confirmed", "rejected"] = "confirmed"
     source: Literal["manual", "suggestion"] = "manual"
-    omitted: bool = False
-    note: str = Field(default="", max_length=2000)
+    # None: keep the stored value of an existing link
+    omitted: bool | None = None
+    note: str | None = Field(default=None, max_length=2000)
 
 
 class LinkUpdate(BaseModel):
@@ -91,9 +131,100 @@ class ProjectCreate(BaseModel):
     hotwords: str = Field(default="", max_length=2000)
 
 
+# control, format, surrogate, line and paragraph separator characters
+_UNSAFE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
+
+
+def _plain(value: str) -> str:
+    """One-line text: no control or invisible format characters at all."""
+    if any(unicodedata.category(c) in _UNSAFE_CATEGORIES for c in value):
+        raise ValueError("Steuerzeichen sind nicht erlaubt")
+    return value
+
+
+def _multiline(value: str) -> str:
+    """Text from a textarea: line breaks allowed, other control characters not."""
+    if any(unicodedata.category(c) in _UNSAFE_CATEGORIES and c not in "\r\n" for c in value):
+        raise ValueError("Steuerzeichen sind nicht erlaubt")
+    return value
+
+
+Plain = Annotated[str, AfterValidator(_plain)]
+Multiline = Annotated[str, AfterValidator(_multiline)]
+
+
 class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     hotwords: str | None = Field(default=None, max_length=2000)
+    smoothing_tags: Multiline | None = Field(default=None, max_length=2000)
+
+
+class WordRange(BaseModel):
+    turn: int = Field(ge=0)
+    first: int = Field(ge=0)
+    last: int = Field(ge=0)
+
+
+class EditCreate(WordRange):
+    action: Literal["replace", "delete"]
+    kind: Literal["correction", "smoothing"]
+    text: Plain = Field(default="", max_length=MAX_TEXT_LEN)
+    tag: Plain = Field(default="", max_length=MAX_TAG_LEN)
+
+
+class SpeakerUpdate(WordRange):
+    speaker: str | None = Field(default=None, max_length=60)  # None: diarization's speaker
+
+
+class ReferenceRequest(BaseModel):
+    until: float = Field(ge=0, le=3600)  # the checked reference: start up to this second
+    margin: float = Field(default=0.1, ge=0.0, le=0.5)
+    min_seconds: float = Field(default=1.0, ge=0.3, le=5.0)
+    use_voice: bool = False  # the interviewer's voice profile (then no reference needed)
+
+
+class InsertCreate(BaseModel):
+    at: int = Field(ge=0)  # the position the new paragraph gets
+    speaker: str = Field(max_length=60)
+    start: float = Field(ge=0, le=24 * 3600)
+    end: float = Field(ge=0, le=24 * 3600)
+    text: str = Field(min_length=1, max_length=MAX_INSERT_CHARS)
+
+
+class InsertUpdate(BaseModel):
+    speaker: str | None = Field(default=None, max_length=60)
+    start: float | None = Field(default=None, ge=0, le=24 * 3600)
+    end: float | None = Field(default=None, ge=0, le=24 * 3600)
+    text: str | None = Field(default=None, min_length=1, max_length=MAX_INSERT_CHARS)
+    force: bool = False  # a new text removes the markings on the old words: only if confirmed
+
+
+class SpeakerBatch(BaseModel):
+    changes: list[SpeakerUpdate] = Field(min_length=1, max_length=200)
+
+
+class VoiceLearn(BaseModel):
+    speaker: str = Field(max_length=60)
+    until: float | None = Field(default=None, ge=0, le=24 * 3600)  # only this much was checked
+    replace: bool = False  # start the profile over instead of refining it
+
+
+class ReviewedUpdate(BaseModel):
+    reviewed: bool
+
+
+class DecisionUpdate(BaseModel):
+    reason: Literal["not_asked", "not_relevant", "other"] | None = None
+    note: Multiline = Field(default="", max_length=2000)
+
+
+class ExtractCreate(Span):
+    guide_code: Plain = Field(max_length=40)
+    paraphrase: Multiline = Field(max_length=2000)
+
+
+class ExtractUpdate(BaseModel):
+    paraphrase: Multiline = Field(max_length=2000)
 
 
 class InterviewCreate(BaseModel):
@@ -101,7 +232,9 @@ class InterviewCreate(BaseModel):
 
 
 class TranscribeRequest(BaseModel):
-    model: str = Field(default="whisper-large-v3", max_length=60)
+    # None: the default settings (see "Transkription" in the website)
+    settings: TranscriptionSettings | None = None
+    preset: str = Field(default="", max_length=60)  # only shown with the job
     # Re-transcribing changes all word positions, so earlier markings would point to
     # the wrong words. They are removed – only after the user confirmed it.
     discard_markings: bool = False
@@ -115,10 +248,6 @@ class GuideText(BaseModel):
     text: str = Field(max_length=MAX_GUIDE_CHARS)
 
 
-def _guide_from_dict(d: dict[str, Any]) -> Guide:
-    return Guide(d.get("title"), [GuideQuestion(**q) for q in d["questions"]])
-
-
 class _Data:
     """Transcripts and guides are re-read only when their file changes."""
 
@@ -127,6 +256,7 @@ class _Data:
         self.store = store
         self.legacy_guide = legacy_guide
         self._cache: dict[Path, tuple[float, Transcript]] = {}
+        self._merged: dict[str, tuple[tuple, Transcript]] = {}  # with the inserted paragraphs
         self._guides: dict[Path, tuple[float, Guide | None, str | None]] = {}
 
     def transcripts(self, ids: list[str] | None = None) -> dict[str, Transcript]:
@@ -139,8 +269,26 @@ class _Data:
             if cached is None or cached[0] != mtime:
                 t = Transcript.from_dict(json.loads(path.read_text(encoding="utf-8")))
                 cached = self._cache[path] = (mtime, t)
-            out[cached[1].meta["interview_id"]] = cached[1]
+            # an ID from the file contents becomes a path component later: accept only
+            # IDs that match the folder name and the ID rules
+            if (not INTERVIEW_ID.match(path.stem)
+                    or cached[1].meta.get("interview_id") != path.stem):
+                continue
+            out[path.stem] = self._with_inserts(path.stem, mtime, cached[1])
         return out
+
+    def _with_inserts(self, iid: str, mtime: float, t: Transcript) -> Transcript:
+        """The transcript every stored position refers to: recorded turns plus the
+        paragraphs you inserted (see :func:`interis.web.edits.with_inserts`)."""
+        inserts = self.store.inserts(iid)
+        if not inserts:
+            return t
+        key = (mtime, tuple((i["id"], i["at"], i["speaker"], i["start"], i["end"], i["text"])
+                            for i in inserts))
+        cached = self._merged.get(iid)
+        if cached is None or cached[0] != key:
+            cached = self._merged[iid] = (key, with_inserts(t, inserts))
+        return cached[1]
 
     def guide_file(self, project_id: int) -> Path:
         return guide_path_for(self.paths, project_id)
@@ -186,8 +334,17 @@ class _Data:
                 return path.read_text(encoding="utf-8-sig")
         for t in self.transcripts(ids).values():
             if t.analysis.get("guide"):
-                return _guide_from_dict(t.analysis["guide"]).to_markdown()
+                return Guide.from_dict(t.analysis["guide"]).to_markdown()
         return None
+
+
+def _docx_unpacked_size(data: bytes) -> int:
+    """Sum of the declared sizes of all parts of a zip-based file (0 if it is not a zip)."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            return sum(info.file_size for info in zf.infolist())
+    except zipfile.BadZipFile:
+        return 0
 
 
 def create_app(paths: Paths, login_token: str, port: int,
@@ -211,6 +368,9 @@ def create_app(paths: Paths, login_token: str, port: int,
         return project["hotwords"].strip() if project else ""
 
     runner = JobRunner(paths, store, job_guide, job_hotwords)
+    # Every check of the job queue or of word positions and the write it guards runs under
+    # this lock, so a transcription cannot start between the check and the write.
+    write_lock = threading.Lock()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -220,6 +380,14 @@ def create_app(paths: Paths, login_token: str, port: int,
 
     app = secure_app(login_token, port, lifespan)
     app.state.runner = runner
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_input(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        # The default answer echoes the rejected value; a lone surrogate in it cannot be
+        # encoded as UTF-8, which turned the 422 into a 500. Location, message and type stay.
+        detail = [{"loc": list(e["loc"]), "msg": e["msg"], "type": e["type"]}
+                  for e in exc.errors()]
+        return JSONResponse({"detail": detail}, status_code=422)
     add_system_routes(app, paths, store, runner, on_restart)
 
     # ------------------------------------------------------------------ helpers
@@ -242,16 +410,17 @@ def create_app(paths: Paths, login_token: str, port: int,
         return [j for j in store.jobs(ids) if j["status"] in ("queued", "running")]
 
     def _queue_analysis(ids: list[str]) -> int:
-        """Re-run the question analysis (not the transcription) after a guide change."""
-        pending = {(j["kind"], j["interview_id"]) for j in _active_jobs(ids)}
+        """Re-run the question analysis (not the transcription) after a guide change or edit.
+        A running analysis does not block: it read the edits before they were changed."""
         n = 0
-        for iid in ids:
-            if not (paths.exports / iid / f"{iid}.json").is_file():
-                continue
-            if ("analyze", iid) in pending or ("transcribe", iid) in pending:
-                continue
-            store.add_job("analyze", iid)
-            n += 1
+        with write_lock:
+            pending = {j["interview_id"] for j in _active_jobs(ids)
+                       if j["kind"] == "analyze" and j["status"] == "queued"}
+            for iid in ids:
+                if not (paths.exports / iid / f"{iid}.json").is_file() or iid in pending:
+                    continue
+                store.add_job("analyze", iid)
+                n += 1
         runner.notify()
         return n
 
@@ -288,6 +457,15 @@ def create_app(paths: Paths, login_token: str, port: int,
             raise HTTPException(404, "unknown interview")
         return pid
 
+    add_transcription_routes(app, paths, store, runner, _interview_in_project)
+
+    def _has_work(interview: str) -> bool:
+        """Anything a person did on this interview that word positions would break."""
+        return bool(store.question_marks(interview) or store.links(interview)
+                    or store.word_edits(interview) or store.speaker_edits(interview)
+                    or store.extracts([interview]) or store.inserts(interview)
+                    or store.decisions(interview) or store.reviewed(interview))
+
     def _not_busy(interview: str) -> None:
         if any(j["status"] in ("queued", "running") for j in store.jobs([interview])):
             raise HTTPException(409, "Erst den laufenden Auftrag abbrechen")
@@ -297,7 +475,66 @@ def create_app(paths: Paths, login_token: str, port: int,
         if path.parent == paths.audio and path.is_file():
             path.unlink()
 
-    def _check_span(t: Transcript, s: Span | QuestionDelete, last: int | None = None) -> None:
+    def _state_of(interview: str, t: Transcript, guide: Guide | None) -> dict[str, Any]:
+        """Review state on the effective transcript (word edits applied)."""
+        return interview_state(t, store.question_marks(interview), store.links(interview),
+                               guide, store.word_edits(interview), store.decisions(interview),
+                               store.speaker_edits(interview))
+
+    def _with_passage(t: Transcript, lk: dict[str, Any]) -> dict[str, Any]:
+        """A link with the passage fields of the effective transcript (none if the link
+        points outside the transcript, as stale rows of a replaced transcript can)."""
+        if lk["turn"] >= len(t.turns) or lk["last"] >= len(t.turns[lk["turn"]].words):
+            return lk
+        return {**lk, **passage(t, lk["turn"], lk["first"], lk["last"])}
+
+    def _paraphrase(text: str) -> str:
+        if not text.strip():
+            raise HTTPException(422, "Kernaussage fehlt")
+        return text.strip()
+
+    def _tags_of(raw: str) -> list[str]:
+        tags = parse_tags(raw)
+        if len(tags) > MAX_TAGS or any(len(tag) > MAX_TAG_LEN for tag in tags):
+            raise HTTPException(422, f"Höchstens {MAX_TAGS} Tags, je {MAX_TAG_LEN} Zeichen")
+        return tags
+
+    def _not_transcribing(interview: str) -> None:
+        """Word positions change with a new transcription, so no marking is written meanwhile
+        (edits, question marks, links, extracts, decisions, "Korrektur abgeschlossen")."""
+        if any(j["kind"] == "transcribe" and j["status"] in ("queued", "running")
+               for j in store.jobs([interview])):
+            raise HTTPException(409, "Erst die laufende Transkription abwarten")
+
+    def _extract_rows(pid: int) -> list[dict[str, Any]]:
+        """Extracts of a project; ``text`` and times come from the effective transcript.
+        ``in_guide`` is False for a guide code that the guide no longer has."""
+        ids = store.project_interviews(pid)
+        transcripts = data.transcripts(ids)
+        guide, _ = data.guide(pid)
+        codes = {q.code for q in guide.questions} if guide else set()
+        effective: dict[str, Transcript] = {}
+        rows = []
+        for e in store.extracts(ids):
+            iid = e["interview_id"]
+            if iid not in transcripts:
+                continue
+            if iid not in effective:
+                effective[iid] = apply_edits(transcripts[iid], store.word_edits(iid),
+                                             store.speaker_edits(iid))
+            t = effective[iid]
+            if e["turn"] >= len(t.turns) or e["last"] >= len(t.turns[e["turn"]].words):
+                continue
+            p = passage(t, e["turn"], e["first"], e["last"])
+            rows.append({"id": e["id"], "interview": iid, "guide_code": e["guide_code"],
+                         "turn": e["turn"], "first": e["first"], "last": e["last"],
+                         "start": p["start"], "end": p["end"], "text": p["text"],
+                         "paraphrase": e["paraphrase"], "updated_at": e["updated_at"],
+                         "in_guide": e["guide_code"] in codes})
+        return rows
+
+    def _check_span(t: Transcript, s: Span | QuestionDelete | WordRange,
+                    last: int | None = None) -> None:
         if s.turn >= len(t.turns):
             raise HTTPException(422, "turn out of range")
         n = len(t.turns[s.turn].words)
@@ -331,8 +568,10 @@ def create_app(paths: Paths, login_token: str, port: int,
     @app.patch("/api/projects/{pid}")
     def update_project(pid: int, body: ProjectUpdate) -> dict[str, bool]:
         _project(pid)
+        tags = None if body.smoothing_tags is None else "\n".join(_tags_of(body.smoothing_tags))
         store.update_project(pid, body.name.strip() if body.name else None,
-                             body.hotwords.strip() if body.hotwords is not None else None)
+                             body.hotwords.strip() if body.hotwords is not None else None,
+                             tags)
         return {"ok": True}
 
     @app.get("/api/projects/{pid}")
@@ -370,6 +609,7 @@ def create_app(paths: Paths, login_token: str, port: int,
             n += 1
         return {
             "project": p,
+            "tags": project_tags(p["smoothing_tags"]),
             "guide": guide.to_dict() if guide else None,
             "guide_text": guide_file.read_text(encoding="utf-8-sig")
             if guide_file.is_file() else "",
@@ -383,12 +623,13 @@ def create_app(paths: Paths, login_token: str, port: int,
     def save_guide(pid: int, body: GuideText) -> dict[str, int]:
         _project(pid)
         try:
-            guide = parse_guide(body.text)
+            text = label_guide(body.text)  # codes of unlabelled questions are kept from now on
+            guide = parse_guide(text)
         except GuideError as e:
             raise HTTPException(422, f"Leitfaden: {e}") from e
         target = data.guide_file(pid)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(body.text, encoding="utf-8")
+        target.write_text(text, encoding="utf-8")
         queued = _queue_analysis(store.project_interviews(pid))
         return {"questions": len(guide.questions), "reanalyze": queued}
 
@@ -404,6 +645,13 @@ def create_app(paths: Paths, login_token: str, port: int,
         except GuideError as e:
             return {"guide": None, "error": str(e)}
 
+    @app.post("/api/guide/import-typst")
+    def import_typst(body: GuideText) -> dict[str, str]:
+        try:
+            return {"text": typst_to_guide_text(body.text)}
+        except GuideError as e:
+            raise HTTPException(422, f"Typst-Leitfaden: {e}") from e
+
     @app.post("/api/guide/import-docx")
     async def import_docx(request: Request) -> dict[str, str]:
         body = bytearray()
@@ -411,6 +659,8 @@ def create_app(paths: Paths, login_token: str, port: int,
             body.extend(chunk)
             if len(body) > MAX_DOCX_BYTES:
                 raise HTTPException(413, "Datei zu groß")
+        if _docx_unpacked_size(bytes(body)) > MAX_DOCX_UNPACKED:
+            raise HTTPException(413, "Word-Datei enthält zu viel Inhalt")
         try:
             return {"text": docx_to_guide_text(bytes(body))}
         except Exception as e:  # noqa: BLE001 – any malformed file
@@ -485,20 +735,21 @@ def create_app(paths: Paths, login_token: str, port: int,
     @app.post("/api/interviews/{interview}/transcribe")
     def start_transcription(interview: str, body: TranscribeRequest) -> dict[str, int]:
         _interview_in_project(interview)
-        _not_busy(interview)
-        if body.model not in ASR_MODELS:
-            raise HTTPException(422, "unknown model")
+        options = ({**body.settings.checked(), "preset": body.preset}
+                   if body.settings else default_settings(store))
         parts = store.parts(interview)
         if not parts:
             raise HTTPException(422, "Noch keine Aufnahme hochgeladen")
         if not all(p["path"].is_file() for p in parts):
             raise HTTPException(422, "Eine Aufnahme fehlt im Datenordner")
-        if (paths.exports / interview / f"{interview}.json").is_file():
-            has_markings = store.question_marks(interview) or store.links(interview)
-            if has_markings and not body.discard_markings:
+        with write_lock:
+            _not_busy(interview)
+            # The markings stay until the new transcript exists (see JobRunner): a job that is
+            # cancelled or fails leaves the interview as it was.
+            if ((paths.exports / interview / f"{interview}.json").is_file()
+                    and _has_work(interview) and not body.discard_markings):
                 raise HTTPException(409, "Neu transkribieren entfernt deine Markierungen")
-            store.delete_decisions(interview)
-        job_id = store.add_job("transcribe", interview, {"model": body.model})
+            job_id = store.add_job("transcribe", interview, options)
         runner.notify()
         return {"job": job_id}
 
@@ -511,6 +762,10 @@ def create_app(paths: Paths, login_token: str, port: int,
         job = store.job(job_id)
         if job is None or job["status"] not in ("failed", "cancelled"):
             raise HTTPException(409, "job is not failed or cancelled")
+        if job["kind"] == "transcribe" and _has_work(job["interview_id"]):
+            # a transcription replaces the transcript and every position in it
+            raise HTTPException(409, "Neu transkribieren entfernt deine Arbeit: bitte im "
+                                     "Gespräch neu starten und bestätigen")
         new_id = store.add_job(job["kind"], job["interview_id"], job["options"])
         runner.notify()
         return {"job": new_id}
@@ -520,35 +775,393 @@ def create_app(paths: Paths, login_token: str, port: int,
         _project(pid)
         transcripts = data.transcripts(store.project_interviews(pid))
         guide, _ = data.guide(pid)
-        states = {iid: interview_state(t, store.question_marks(iid), store.links(iid), guide)
-                  for iid, t in transcripts.items()}
+        states = {iid: _state_of(iid, t, guide) for iid, t in transcripts.items()}
         return {
             "guide": guide.to_dict() if guide else None,
             "interviews": list(transcripts),
             "cells": {iid: s["cells"] for iid, s in states.items()},
             "unassigned": {iid: s["unassigned"] for iid, s in states.items()},
+            "stale": {iid: edits_stale(t, store.word_edits(iid), store.speaker_edits(iid),
+                                       store.inserts(iid))
+                            for iid, t in transcripts.items()},
         }
 
     # ---------------------------------------------------------------- interviews
     @app.get("/api/interviews/{interview}")
     def interview(interview: str) -> dict[str, Any]:
         t = _transcript(interview)
+        edits = store.word_edits(interview)
+        moved = store.speaker_edits(interview)
+        original = edited_words(t, edits)  # {(turn, word): {orig, kind, tag, action}}
         guide = _guide_of(interview)
-        state = interview_state(t, store.question_marks(interview), store.links(interview),
-                                guide)
+        state = _state_of(interview, t, guide)
+        effective = apply_edits(t, edits, moved)
+        inserted = {i["at"]: i["id"] for i in store.inserts(interview)}
+        corrected = {(s["turn"], s["word"]): 2 if s["source"] == "reference" else 1
+                     for s in moved}
+        codes = {q.code for q in guide.questions} if guide else set()
+        turns = []
+        for ti, tu in enumerate(effective.turns):
+            words = []
+            for wi, w in enumerate(tu.words):
+                item: dict[str, Any] = {"t": w.text, "s": w.start, "e": w.end,
+                                        "p": round(w.prob, 2)}
+                if (ti, wi) in original:
+                    e = original[(ti, wi)]
+                    item["o"], item["k"] = e["orig"], e["kind"]
+                    if e["kind"] == "smoothing":
+                        item["g"] = e["tag"]
+                if w.speaker and w.speaker != tu.speaker:  # said by another speaker
+                    item["sp"] = w.speaker
+                if (ti, wi) in corrected:  # speaker corrected: 1 by hand, 2 by voice
+                    item["so"] = corrected[(ti, wi)]
+                words.append(item)
+            turn_item: dict[str, Any] = {"speaker": tu.speaker, "start": tu.start,
+                                         "end": tu.end, "words": words}
+            if ti in inserted:  # a paragraph you typed in
+                turn_item["ins"] = inserted[ti]
+            turns.append(turn_item)
         return {
             "id": interview,
             "project": store.project_of(interview),
             "parts": [{"offset_s": p["offset_s"], "duration_s": p["duration_s"]}
                       for p in t.parts],
             "speakers": t.speakers,
-            "turns": [{"speaker": tu.speaker, "start": tu.start, "end": tu.end,
-                       "words": [{"t": w.text, "s": w.start, "e": w.end, "p": round(w.prob, 2)}
-                                 for w in tu.words]} for tu in t.turns],
+            "turns": turns,
+            "reviewed": store.reviewed(interview),
+            "edits_stale": edits_stale(t, edits, moved, store.inserts(interview)),
+            "voice_profile": (paths.voices / f"{VOICE}.json").is_file(),
+            "decisions": [{"guide_code": d["guide_code"], "reason": d["reason"],
+                           "note": d["note"], "in_guide": d["guide_code"] in codes}
+                          for d in store.decisions(interview)],
+            "edits": [{k: e[k] for k in ("turn", "word", "action", "kind", "text", "tag")}
+                      for e in edits],
             "questions": state["questions"],
-            "links": store.links(interview),
+            "links": [_with_passage(effective, lk) for lk in store.links(interview)],
             "cells": state["cells"],
         }
+
+    @app.put("/api/interviews/{interview}/reviewed")
+    def set_reviewed(interview: str, body: ReviewedUpdate) -> dict[str, bool]:
+        _transcript(interview)
+        with write_lock:
+            _not_transcribing(interview)
+            store.set_reviewed(interview, body.reviewed)
+        return {"ok": True}
+
+    @app.post("/api/interviews/{interview}/edits")
+    def set_edit(interview: str, body: EditCreate) -> dict[str, int]:
+        """Correction or smoothing of words. Replacing a span: the first word gets the text,
+        the rest is deleted. Does not queue an analysis (the page shows "Analyse veraltet")."""
+        project = _project(_interview_in_project(interview))
+        t = _transcript(interview)
+        _check_span(t, body, body.last)
+        if body.kind == "correction":
+            if body.action != "replace" or body.tag:
+                raise HTTPException(422, "Korrektur: nur ersetzen, ohne Grund")
+        elif body.tag not in project_tags(project["smoothing_tags"]):
+            raise HTTPException(422, "Glättung: Grund aus den Projekt-Tags wählen")
+        text = body.text.strip()
+        if body.action == "replace" and not text:
+            raise HTTPException(422, "Ersatztext fehlt")
+        rows = []
+        for w in range(body.first, body.last + 1):
+            first_replaced = body.action == "replace" and w == body.first
+            rows.append({"turn": body.turn, "word": w, "kind": body.kind, "tag": body.tag,
+                         "action": "replace" if first_replaced else "delete",
+                         "text": text if first_replaced else ""})
+        with write_lock:
+            _not_transcribing(interview)
+            # a word carries one kind of edit: a smoothing is not silently replaced by a
+            # correction (or the other way round); the same kind overwrites
+            kinds = {(e["turn"], e["word"]): e["kind"] for e in store.word_edits(interview)}
+            if any(kinds.get((body.turn, w), body.kind) != body.kind
+                   for w in range(body.first, body.last + 1)):
+                raise HTTPException(409, "Diese Stelle hat schon eine andere Änderung: "
+                                         "erst zurücknehmen")
+            store.set_word_edits(interview, rows)
+        return {"ok": True, "edited": len(rows)}
+
+    @app.post("/api/interviews/{interview}/edits/revert")
+    def revert_edits(interview: str, body: WordRange) -> dict[str, bool]:
+        _check_span(_transcript(interview), body, body.last)
+        with write_lock:
+            _not_transcribing(interview)
+            store.revert_word_edits(interview, body.turn, body.first, body.last)
+        return {"ok": True}
+
+    @app.post("/api/interviews/{interview}/speakers")
+    def set_speakers(interview: str, body: SpeakerUpdate) -> dict[str, bool]:
+        """Words given to another speaker than diarization found (``speaker`` None: back to
+        diarization's). Does not queue an analysis (the page shows "Analyse veraltet")."""
+        _interview_in_project(interview)
+        t = _transcript(interview)
+        _check_span(t, body, body.last)
+        if body.speaker is not None and body.speaker not in {s["label"] for s in t.speakers}:
+            raise HTTPException(422, "unknown speaker")
+        words = t.turns[body.turn].words
+        # the speaker diarization gave a word needs no correction row
+        change = {w: None if body.speaker in (None, words[w].speaker) else body.speaker
+                  for w in range(body.first, body.last + 1)}
+        with write_lock:
+            _not_transcribing(interview)
+            store.set_speakers(interview, body.turn, change)
+        return {"ok": True}
+
+    def _check_insert(t: Transcript, speaker: str, start: float, end: float, text: str) -> str:
+        if speaker not in {s["label"] for s in t.speakers}:
+            raise HTTPException(422, "unknown speaker")
+        duration = max((p["offset_s"] + p["duration_s"] for p in t.parts), default=0.0)
+        if not 0 <= start < end <= duration + 5:
+            raise HTTPException(422, "Zeitspanne: Anfang vor Ende, innerhalb der Aufnahme")
+        if end - start > 600:
+            raise HTTPException(422, "Ein Absatz dauert höchstens 10 Minuten")
+        text = " ".join(text.split())
+        if not text:
+            raise HTTPException(422, "Text fehlt")
+        if len(text.split()) > MAX_INSERT_WORDS:
+            raise HTTPException(422, f"Höchstens {MAX_INSERT_WORDS} Wörter je Absatz")
+        return text
+
+    def _insert_row(interview: str, insert_id: int) -> dict[str, Any]:
+        row = next((i for i in store.inserts(interview) if i["id"] == insert_id), None)
+        if row is None:
+            raise HTTPException(404, "unknown paragraph")
+        return row
+
+    @app.post("/api/interviews/{interview}/inserts")
+    def add_insert(interview: str, body: InsertCreate) -> dict[str, int]:
+        """A paragraph you type in (e.g. an interjection diarization missed), placed at
+        position ``at``. Later turns move down by one, with everything stored for them.
+        The page shows "Analyse veraltet"."""
+        _interview_in_project(interview)
+        t = _transcript(interview)
+        text = _check_insert(t, body.speaker, body.start, body.end, body.text)
+        if body.at > len(t.turns):
+            raise HTTPException(422, "position outside the transcript")
+        with write_lock:
+            _not_transcribing(interview)
+            if len(store.inserts(interview)) >= MAX_INSERTS:
+                raise HTTPException(409, f"Höchstens {MAX_INSERTS} eingefügte Absätze")
+            new_id = store.add_insert(interview, body.at, body.speaker, body.start, body.end,
+                                      text)
+        return {"id": new_id, "at": body.at}
+
+    @app.put("/api/interviews/{interview}/inserts/{insert_id}")
+    def update_insert(interview: str, insert_id: int, body: InsertUpdate) -> dict[str, bool]:
+        _interview_in_project(interview)
+        t = _transcript(interview)
+        row = _insert_row(interview, insert_id)
+        merged = {"speaker": body.speaker or row["speaker"],
+                  "start": row["start"] if body.start is None else body.start,
+                  "end": row["end"] if body.end is None else body.end,
+                  "text": row["text"] if body.text is None else body.text}
+        merged["text"] = _check_insert(t, merged["speaker"], merged["start"], merged["end"],
+                                       merged["text"])
+        new_words = merged["text"] != row["text"]
+        with write_lock:
+            _not_transcribing(interview)
+            if new_words and not body.force and store.turn_has_markings(interview, row["at"]):
+                raise HTTPException(409, "Ein neuer Text entfernt die Korrekturen und "
+                                         "Markierungen in diesem Absatz")
+            store.update_insert(interview, insert_id, merged, new_words)
+        return {"ok": True}
+
+    @app.delete("/api/interviews/{interview}/inserts/{insert_id}")
+    def delete_insert(interview: str, insert_id: int, force: bool = False) -> dict[str, bool]:
+        _interview_in_project(interview)
+        row = _insert_row(interview, insert_id)
+        with write_lock:
+            _not_transcribing(interview)
+            if not force and store.turn_has_markings(interview, row["at"]):
+                raise HTTPException(409, "In diesem Absatz sind Korrekturen oder Markierungen")
+            store.delete_insert(interview, insert_id)
+        return {"ok": True}
+
+    @app.post("/api/interviews/{interview}/speakers/batch")
+    def set_speakers_batch(interview: str, body: SpeakerBatch) -> dict[str, int]:
+        """Several word ranges given to speakers in one step (moving the border between two
+        speakers' blocks touches words of more than one turn); all or nothing."""
+        _interview_in_project(interview)
+        t = _transcript(interview)
+        labels = {s["label"] for s in t.speakers}
+        per_turn: dict[int, dict[int, str | None]] = {}
+        for c in body.changes:
+            _check_span(t, c, c.last)
+            if c.speaker is not None and c.speaker not in labels:
+                raise HTTPException(422, "unknown speaker")
+            turn = t.turns[c.turn]
+            for w in range(c.first, c.last + 1):
+                found = turn.words[w].speaker or turn.speaker  # what diarization gave the word
+                per_turn.setdefault(c.turn, {})[w] = (
+                    None if c.speaker in (None, found) else c.speaker)
+        with write_lock:
+            _not_transcribing(interview)
+            for turn, change in per_turn.items():
+                store.set_speakers(interview, turn, change)
+        return {"words": sum(len(c) for c in per_turn.values())}
+
+    @app.post("/api/interviews/{interview}/speakers/reference")
+    def speakers_by_reference(interview: str, body: ReferenceRequest) -> dict[str, int]:
+        """Assign the speakers after the reference stretch by voice (a background job; see
+        interis.analysis.speakers). Its result replaces earlier results of this kind."""
+        if body.use_voice and not (paths.voices / f"{VOICE}.json").is_file():
+            raise HTTPException(422, "Noch kein Stimmprofil")
+        if not body.use_voice and body.until < 10:
+            raise HTTPException(422, "Referenz: mindestens 10 Sekunden")
+        return {"job": _speakers_job(interview, body.model_dump())}
+
+    @app.post("/api/interviews/{interview}/voice-profile")
+    def learn_voice(interview: str, body: VoiceLearn) -> dict[str, int]:
+        """Refine the interviewer's voice profile with this interview's ``speaker`` (their
+        sentences, speaker corrections applied; up to ``until`` if only the start was
+        checked). ``replace`` starts the profile over."""
+        if body.speaker not in {s["label"] for s in _transcript(interview).speakers}:
+            raise HTTPException(422, "unknown speaker")
+        options = {"learn": body.speaker, "min_seconds": 1.0, "replace": body.replace}
+        if body.until:
+            options["until"] = body.until
+        return {"job": _speakers_job(interview, options)}
+
+    def _speakers_job(interview: str, options: dict[str, Any]) -> int:
+        _interview_in_project(interview)
+        _transcript(interview)
+        parts = store.parts(interview)
+        if not parts or not all(p["path"].is_file() for p in parts):
+            raise HTTPException(422, "Die Aufnahme fehlt im Datenordner")
+        with write_lock:
+            _not_busy(interview)
+            job_id = store.add_job("speakers", interview, options)
+        runner.notify()
+        return job_id
+
+    @app.delete("/api/interviews/{interview}/speakers/reference")
+    def undo_speakers_by_reference(interview: str) -> dict[str, bool]:
+        _transcript(interview)
+        with write_lock:
+            _not_transcribing(interview)
+            store.set_reference_speakers(interview, [])
+        return {"ok": True}
+
+    @app.post("/api/interviews/{interview}/analyze")
+    def analyze_interview(interview: str) -> dict[str, int]:
+        _transcript(interview)
+        return {"queued": _queue_analysis([interview])}
+
+    @app.put("/api/interviews/{interview}/questions/{code}/decision")
+    def set_decision(interview: str, code: str, body: DecisionUpdate) -> dict[str, bool]:
+        _transcript(interview)
+        _check_code(code, _guide_of(interview))
+        with write_lock:
+            _not_transcribing(interview)
+            if body.reason is None:
+                store.delete_decision(interview, code)
+            else:
+                store.set_decision(interview, code, body.reason, body.note.strip())
+        return {"ok": True}
+
+    @app.get("/api/projects/{pid}/workflow")
+    def workflow(pid: int) -> dict[str, Any]:
+        _project(pid)
+        ids = store.project_interviews(pid)
+        transcripts = data.transcripts(ids)
+        guide, _ = data.guide(pid)
+        codes = [q.code for q in guide.questions] if guide else []
+        extract_counts = Counter(r["interview"] for r in _extract_rows(pid) if r["in_guide"])
+        rows = []
+        for iid in ids:
+            t = transcripts.get(iid)
+            edits = store.word_edits(iid)
+            moved = store.speaker_edits(iid)
+            cells: dict[str, str] = {}
+            unassigned, stale = 0, False
+            if t is not None:
+                state = _state_of(iid, t, guide)
+                cells = {code: cell["status"] for code, cell in state["cells"].items()}
+                unassigned = len(state["unassigned"])
+                stale = edits_stale(t, edits, moved, store.inserts(iid))
+            rows.append({"id": iid, "transcribed": t is not None,
+                         "reviewed": store.reviewed(iid), "edits": edits,
+                         "edits_stale": stale, "cells": cells, "unassigned": unassigned,
+                         "extracts": extract_counts[iid]})
+        return workflow_state(codes, rows)
+
+    @app.get("/api/projects/{pid}/extracts")
+    def list_extracts(pid: int) -> dict[str, list[dict[str, Any]]]:
+        _project(pid)
+        return {"extracts": _extract_rows(pid)}
+
+    @app.get("/api/projects/{pid}/extracts/export")
+    def export_extracts(pid: int,
+                        fmt: Literal["docx", "csv"] = Query(alias="format")) -> Response:
+        """Generated in memory, nothing is written to disk."""
+        _project(pid)
+        guide, _ = data.guide(pid)
+        titles = {q.code: q.text for q in guide.questions} if guide else {}
+        rows = export.table(_extract_rows(pid), titles)
+        if fmt == "csv":
+            body, media = export.csv_bytes(rows), export.CSV_MIME
+        else:
+            body, media = export.docx_bytes(rows), export.DOCX_MIME
+        return Response(body, media_type=media, headers={
+            "Content-Disposition": f'attachment; filename="extraktion-p{pid}.{fmt}"'})
+
+    @app.post("/api/extracts")
+    def create_extract(body: ExtractCreate) -> dict[str, int]:
+        t = _transcript(body.interview)
+        _check_span(t, body, body.last)
+        _check_code(body.guide_code, _guide_of(body.interview))
+        paraphrase = _paraphrase(body.paraphrase)
+        with write_lock:
+            _not_transcribing(body.interview)
+            extract_id = store.add_extract(body.interview, body.guide_code, body.turn,
+                                           body.first, body.last, paraphrase)
+        return {"id": extract_id}
+
+    @app.patch("/api/extracts/{extract_id}")
+    def update_extract(extract_id: int, body: ExtractUpdate) -> dict[str, bool]:
+        paraphrase = _paraphrase(body.paraphrase)
+        with write_lock:
+            extract = store.extract(extract_id)
+            if extract is None:
+                raise HTTPException(404, "unknown extract")
+            _not_transcribing(extract["interview_id"])
+            store.update_extract(extract_id, paraphrase)
+        return {"ok": True}
+
+    @app.delete("/api/extracts/{extract_id}")
+    def delete_extract(extract_id: int) -> dict[str, bool]:
+        with write_lock:
+            extract = store.extract(extract_id)
+            if extract is None:
+                raise HTTPException(404, "unknown extract")
+            _not_transcribing(extract["interview_id"])
+            store.delete_extract(extract_id)
+        return {"ok": True}
+
+    def _peaks_job(interview: str) -> dict[str, Any] | None:
+        return next((j for j in reversed(store.jobs()) if j["kind"] == "peaks"
+                     and j["options"].get("interview") == interview
+                     and j["status"] in ("queued", "running")), None)
+
+    @app.get("/api/interviews/{interview}/peaks")
+    def peaks(interview: str) -> dict[str, Any]:
+        """Waveform overview (one byte per 50 ms, base64) for the timeline, or why not yet."""
+        t = _transcript(interview)
+        out = peaks_file(paths, t.meta["audio"]["sha256"])
+        if out.is_file():
+            return {"status": "ready", **json.loads(out.read_text(encoding="utf-8"))}
+        return {"status": "running" if _peaks_job(interview) else "missing"}
+
+    @app.post("/api/interviews/{interview}/peaks")
+    def make_peaks(interview: str) -> dict[str, Any]:
+        _interview_in_project(interview)
+        _transcript(interview)
+        job = _peaks_job(interview)
+        if job is None:
+            job = {"id": store.add_job("peaks", "", {"interview": interview})}
+            runner.notify()
+        return {"job": job["id"]}
 
     @app.get("/api/interviews/{interview}/audio")
     def audio(interview: str) -> FileResponse:
@@ -582,6 +1195,8 @@ def create_app(paths: Paths, login_token: str, port: int,
         if known:
             shas.add(combined_sha(known))
         for sha in shas:
+            if not SHA256_HEX.match(sha):  # a crafted value like ".." must never reach rmtree
+                continue
             cache = paths.cache / sha[:16]
             if cache.parent == paths.cache and cache.is_dir():
                 shutil.rmtree(cache)
@@ -589,6 +1204,7 @@ def create_app(paths: Paths, login_token: str, port: int,
             shutil.rmtree(exports)
         for part in parts:
             _remove_upload(part["path"])
+        remove_trials(paths, store, interview)
         store.delete_interview(interview)
         return {"ok": True}
 
@@ -599,14 +1215,18 @@ def create_app(paths: Paths, login_token: str, port: int,
         _check_code(body.guide_code, _guide_of(body.interview))
         auto = {(q["turn"], q["first"]) for q in t.analysis.get("questions", [])}
         source = "auto" if (body.turn, body.first) in auto else "manual"
-        store.set_question(body.interview, body.turn, body.first, body.last, body.guide_code,
-                           body.match, body.status, source)
+        with write_lock:
+            _not_transcribing(body.interview)
+            store.set_question(body.interview, body.turn, body.first, body.last, body.guide_code,
+                               body.match, body.status, source)
         return {"ok": True}
 
     @app.post("/api/questions/reset")
     def reset_question(body: QuestionDelete) -> dict[str, bool]:
         _check_span(_transcript(body.interview), body)
-        store.delete_question(body.interview, body.turn, body.first)
+        with write_lock:
+            _not_transcribing(body.interview)
+            store.delete_question(body.interview, body.turn, body.first)
         return {"ok": True}
 
     @app.post("/api/links")
@@ -614,18 +1234,31 @@ def create_app(paths: Paths, login_token: str, port: int,
         t = _transcript(body.interview)
         _check_span(t, body, body.last)
         _check_code(body.guide_code, _guide_of(body.interview))
-        link_id = store.set_link(body.interview, body.guide_code, body.turn, body.first,
-                                 body.last, body.status, body.source, body.omitted, body.note)
+        with write_lock:
+            _not_transcribing(body.interview)
+            link_id = store.set_link(body.interview, body.guide_code, body.turn, body.first,
+                                     body.last, body.status, body.source, body.omitted,
+                                     body.note)
         return {"id": link_id}
 
     @app.patch("/api/links/{link_id}")
     def update_link(link_id: int, body: LinkUpdate) -> dict[str, bool]:
-        store.update_link(link_id, body.omitted, body.note)
+        with write_lock:
+            link = store.link(link_id)
+            if link is None:
+                raise HTTPException(404, "unknown link")
+            _not_transcribing(link["interview_id"])
+            store.update_link(link_id, body.omitted, body.note)
         return {"ok": True}
 
     @app.delete("/api/links/{link_id}")
     def delete_link(link_id: int) -> dict[str, bool]:
-        store.delete_link(link_id)
+        with write_lock:
+            link = store.link(link_id)
+            if link is None:
+                raise HTTPException(404, "unknown link")
+            _not_transcribing(link["interview_id"])
+            store.delete_link(link_id)
         return {"ok": True}
 
     return app

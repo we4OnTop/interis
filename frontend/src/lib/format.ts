@@ -1,4 +1,4 @@
-import type { CellStatus, LinkType, Match } from "./api";
+import type { CellStatus, DecisionReason, LinkType, Match } from "./api";
 
 export function clock(seconds: number): string {
   const s = Math.max(0, Math.floor(seconds));
@@ -39,18 +39,20 @@ export function bytes(n: number | null): string {
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
+/** The one name per cell status, used everywhere (badges, sidebar, question view, docs). */
 export const STATUS_LABEL: Record<CellStatus, string> = {
   asked: "gestellt",
-  answered_elsewhere: "an anderer Stelle beantwortet",
+  answered_elsewhere: "anderswo beantwortet",
   omitted: "weggelassen – schon beantwortet",
-  missing: "nicht gestellt",
+  explained: "nicht gestellt – begründet",
+  skipped: "entfallen – optional",
+  missing: "fehlt – begründen",
 };
 
-export const STATUS_SHORT: Record<CellStatus, string> = {
-  asked: "gestellt",
-  answered_elsewhere: "anderswo",
-  omitted: "weggelassen",
-  missing: "fehlt",
+export const REASON_LABEL: Record<DecisionReason, string> = {
+  not_asked: "Nicht gestellt",
+  not_relevant: "Nicht relevant für diese Person",
+  other: "Sonstiges",
 };
 
 export const LINK_LABEL: Record<LinkType, string> = {
@@ -70,6 +72,10 @@ export const STAGE_LABEL: Record<string, string> = {
   start: "Start, Modelle laden",
   hash: "Dateien prüfen",
   decode: "Audio lesen",
+  dereverb: "Hall reduzieren",
+  speakers: "Sprecher nach Stimme zuordnen",
+  voice: "Sätze nach Stimme zuordnen",
+  tune: "Einstellungen vergleichen",
   transcribe: "Spracherkennung",
   align: "Wörter ausrichten",
   diarize: "Sprechertrennung",
