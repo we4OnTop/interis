@@ -29,9 +29,11 @@ def passage(t: Transcript, turn: int, first: int, last: int) -> dict[str, Any]:
 
 
 def edits_stale(t: Transcript, edits: list[dict[str, Any]],
-                speakers: list[dict[str, Any]] = ()) -> bool:
-    """True if the analysis was made before the current word and speaker edits."""
-    return edits_digest(edits, speakers) != t.analysis.get("edits_digest", EMPTY_DIGEST)
+                speakers: list[dict[str, Any]] = (), inserts: list[dict[str, Any]] = ()) -> bool:
+    """True if the analysis was made before the current word and speaker edits and the
+    paragraphs you inserted."""
+    return (edits_digest(edits, speakers, inserts)
+            != t.analysis.get("edits_digest", EMPTY_DIGEST))
 
 
 def span_fits(t: Transcript, turn: int, first: int, last: int) -> bool:

@@ -28,6 +28,7 @@ import { useFeedback } from "@/lib/feedback";
 import { clock, partAt, STATUS_LABEL, stamp, tagText } from "@/lib/format";
 import { usePlayer, usePlayerState } from "@/lib/player";
 import { useProject } from "@/lib/project";
+import { InsertEditor, type Draft } from "@/components/InsertEditor";
 import { TimeRail, RAIL_WIDTH } from "@/components/TimeRail";
 import { ReviewProvider, useReview, type Span } from "@/lib/review";
 import { href } from "@/lib/router";
@@ -126,12 +127,33 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
   const [editError, setEditError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [byVoice, setByVoice] = useState(false);
+  const [draft, setDraft] = useState<Draft | null>(null); // a paragraph being typed in
   const speakers = useMemo(() => Object.fromEntries(d.speakers.map((s) => [s.label, s])), [d.speakers]);
 
   // the transcript changed under the open dialog (a job finished): its word positions may have moved
   useEffect(() => {
     setEdit(null);
+    setDraft(null);
   }, [dataVersion]);
+  useEffect(() => {
+    if (mode !== "correct") setDraft(null);
+  }, [mode]);
+
+  /** A new paragraph below turn ``at - 1``: by default the other person, right after that turn. */
+  const startDraft = (at: number) => {
+    const prev = d.turns[at - 1];
+    const next = d.turns[at];
+    const start = prev ? prev.end : 0;
+    const room = next ? next.start - start : 3;
+    const other = d.speakers.find((s) => s.label !== prev?.speaker) ?? d.speakers[0];
+    setDraft({ at, speaker: other?.label ?? "", start, end: start + (room >= 2 ? Math.min(room, 3) : 2), text: "" });
+  };
+  const editInsert = (ti: number) => {
+    const t = d.turns[ti];
+    if (t?.ins === undefined) return;
+    setDraft({ id: t.ins, at: ti, speaker: t.speaker ?? "", start: t.start, end: t.end, text: t.words.map((w) => w.t).join("").trim() });
+  };
+  const playRange = useCallback((start: number, end?: number) => player.play(source(d.id), start, end), [player, source, d.id]);
 
   // questions and confirmed links per turn
   const qByTurn = useMemo(() => group(d.questions, (q) => q.turn), [d.questions]);
@@ -327,6 +349,21 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
 
   const guide = detail!.guide?.questions ?? [];
   const multi = d.parts.length > 1;
+  const editor = (x: Draft) => (
+    <InsertEditor
+      interview={d.id}
+      speakers={d.speakers}
+      draft={x}
+      onChange={setDraft}
+      onClose={() => setDraft(null)}
+      play={playRange}
+      onSaved={(at) => {
+        setDraft(null);
+        onChanged();
+        setTimeout(() => document.getElementById(`t-${at}`)?.scrollIntoView({ block: "center", behavior: "smooth" }), 400);
+      }}
+    />
+  );
 
   return (
     <div className="mx-auto flex max-w-7xl gap-6 p-4 sm:p-6 pb-28">
@@ -385,6 +422,8 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
         </div>
 
         <div ref={container} className="bg-card rounded-xl border">
+          {mode === "correct" && <Gap at={0} draft={draft} onAdd={startDraft} />}
+          {mode === "correct" && draft && draft.id === undefined && draft.at === 0 && editor(draft)}
           {d.turns.map((turn, ti) => {
             const part = multi ? partAt(d.parts, turn.start).part : 0;
             const prevPart = multi && ti > 0 ? partAt(d.parts, d.turns[ti - 1].start).part : 0;
@@ -410,7 +449,11 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
                   onSpeakerClick={mode === "correct" ? onSpeakerClick : undefined}
                   onWordClick={onWordClick}
                   onDeleteLink={deleteLink}
+                  onEditInsert={mode === "correct" ? editInsert : undefined}
                 />
+                {mode === "correct" && draft && draft.id !== undefined && draft.at === ti && editor(draft)}
+                {mode === "correct" && <Gap at={ti + 1} draft={draft} onAdd={startDraft} />}
+                {mode === "correct" && draft && draft.id === undefined && draft.at === ti + 1 && editor(draft)}
               </div>
             );
           })}
@@ -422,8 +465,11 @@ function Transcript({ d, focusTurn, onChanged }: { d: InterviewDetail; focusTurn
           <TimeRail
             d={d}
             onChanged={onChanged}
-            play={(start, end) => player.play(source(d.id), start, end)}
+            play={playRange}
             scrollText={(ti) => document.getElementById(`t-${ti}`)?.scrollIntoView({ block: "center", behavior: "smooth" })}
+            draft={draft}
+            onDraft={(patch) => setDraft((x) => (x ? { ...x, ...patch } : x))}
+            onEditInsert={editInsert}
           />
         </aside>
       )}
@@ -908,6 +954,7 @@ const TurnRow = memo(function TurnRow({
   onSpeakerClick,
   onWordClick,
   onDeleteLink,
+  onEditInsert,
 }: {
   ti: number;
   turn: Turn;
@@ -924,6 +971,8 @@ const TurnRow = memo(function TurnRow({
   onSpeakerClick?: (ti: number, x: number, y: number) => void;
   onWordClick: (ti: number, wi: number) => void;
   onDeleteLink: (lk: Link) => void;
+  /** only while correcting: change or remove a paragraph you typed in */
+  onEditInsert?: (ti: number) => void;
 }) {
   const review = useReview();
   const isInterviewer = speaker?.role === "interviewer";
@@ -951,6 +1000,17 @@ const TurnRow = memo(function TurnRow({
           <span className={cn("mr-1.5 text-sm font-semibold", isInterviewer ? "text-interviewer" : "text-foreground")}>
             {speaker?.display_name || turn.speaker || "?"}:
           </span>
+        )}
+        {turn.ins !== undefined && (
+          <button
+            data-selbar
+            className="bg-suggest-soft text-suggest mr-1.5 rounded px-1.5 py-px align-baseline text-[11px] font-semibold"
+            title={onEditInsert ? "Von dir eingefügt – bearbeiten" : "Von dir eingefügt"}
+            disabled={!onEditInsert}
+            onClick={() => onEditInsert?.(ti)}
+          >
+            eingefügt{onEditInsert ? " ✎" : ""}
+          </button>
         )}
         {turn.words.map((w, wi) => {
           // a word another speaker says (corrected by hand): name the speaker where it changes
@@ -1052,4 +1112,24 @@ function lastIndexWhere<T>(arr: T[], pred: (x: T) => boolean): number {
     } else hi = mid - 1;
   }
   return ans;
+}
+
+/** Between two paragraphs while correcting: add a paragraph here. */
+function Gap({ at, draft, onAdd }: { at: number; draft: Draft | null; onAdd: (at: number) => void }) {
+  const open = draft !== null && draft.id === undefined && draft.at === at;
+  return (
+    <div className="group relative h-3 border-b last:border-0">
+      {!open && (
+        <button
+          type="button"
+          data-selbar
+          onClick={() => onAdd(at)}
+          title="Hier einen neuen Absatz einfügen (Interviewer oder Befragte:r)"
+          className="bg-background text-muted-foreground hover:bg-primary hover:text-primary-foreground absolute top-1/2 left-4 flex size-5 -translate-y-1/2 items-center justify-center rounded-full border text-sm leading-none opacity-40 transition group-hover:opacity-100 focus-visible:opacity-100"
+        >
+          +
+        </button>
+      )}
+    </div>
+  );
 }

@@ -16,7 +16,7 @@ from collections import Counter
 from dataclasses import replace
 from typing import Any
 
-from interis.pipeline.types import Transcript, Turn
+from interis.pipeline.types import Transcript, Turn, Word
 
 KINDS = ("correction", "smoothing")
 ACTIONS = ("replace", "delete")
@@ -35,6 +35,9 @@ DEFAULT_TAGS = (
 MAX_TAGS = 30
 MAX_TAG_LEN = 40
 MAX_TEXT_LEN = 200
+MAX_INSERT_CHARS = 2000
+MAX_INSERT_WORDS = 400
+MAX_INSERTS = 500
 
 EMPTY_DIGEST = hashlib.sha256(b"[]").hexdigest()
 
@@ -102,15 +105,48 @@ def apply_edits(t: Transcript, edits: list[dict[str, Any]],
     return Transcript(meta=t.meta, speakers=t.speakers, turns=turns, analysis=t.analysis)
 
 
-def edits_digest(edits: list[dict[str, Any]], speakers: list[dict[str, Any]] = ()) -> str:
+def insert_words(text: str, start: float, end: float, speaker: str) -> list[Word]:
+    """The words of a paragraph you typed in: the time between ``start`` and ``end`` is shared
+    in proportion to the length of the words, so they can be played and marked like others."""
+    tokens = text.split()
+    weights = [len(t) + 1 for t in tokens]
+    total = sum(weights) or 1
+    words, clock = [], start
+    for token, weight in zip(tokens, weights, strict=True):
+        stop = clock + (end - start) * weight / total
+        words.append(Word(f" {token}", round(clock, 3), round(stop, 3), 1.0, speaker=speaker))
+        clock = stop
+    return words
+
+
+def with_inserts(t: Transcript, inserts: list[dict[str, Any]]) -> Transcript:
+    """``t`` with the paragraphs you inserted. ``at`` is the position a paragraph has in the
+    result (they are unique), so every stored position – edits, question marks, links,
+    extracts – refers to the result and not to the recorded transcript. ``t`` is not changed."""
+    if not inserts:
+        return t
+    turns = list(t.turns)
+    for ins in sorted(inserts, key=lambda i: i["at"]):
+        words = insert_words(ins["text"], ins["start"], ins["end"], ins["speaker"])
+        turns.insert(min(ins["at"], len(turns)),
+                     Turn(ins["speaker"], ins["start"], ins["end"], words))
+    return Transcript(meta=t.meta, speakers=t.speakers, turns=turns, analysis=t.analysis)
+
+
+def edits_digest(edits: list[dict[str, Any]], speakers: list[dict[str, Any]] = (),
+                 inserts: list[dict[str, Any]] = ()) -> str:
     """Fingerprint of the edits. The analysis stores the digest of the edits it was run
     with, so a later edit shows up as "analysis outdated"."""
-    if not edits and not speakers:
+    if not edits and not speakers and not inserts:
         return EMPTY_DIGEST
     rows = sorted((e["turn"], e["word"], e["action"], e.get("text", ""), e.get("kind", ""),
                    e.get("tag", "")) for e in edits)
     # speaker corrections only enter when there are some: earlier digests stay the same
     rows += sorted((s["turn"], s["word"], "speaker", s["speaker"], "", "") for s in speakers)
+    # inserted paragraphs likewise only when there are some
+    rows += [(i["at"], -1, "insert", i["speaker"], i["text"],
+              f"{round(i['start'], 3)}-{round(i['end'], 3)}")
+             for i in sorted(inserts, key=lambda i: i["at"])]
     return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 

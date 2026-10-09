@@ -201,11 +201,12 @@ class JobRunner:
         rows = [{k: e[k] for k in ("turn", "word", "action", "kind", "text", "tag")}
                 for e in self.store.word_edits(job["interview_id"])]
         speakers = self.store.speaker_edits(job["interview_id"])
-        if not rows and not speakers:
+        inserts = self.store.inserts(job["interview_id"])
+        if not rows and not speakers and not inserts:
             return False
         self.paths.tmp.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"words": rows, "speakers": speakers}, ensure_ascii=False),
-                        encoding="utf-8")
+        path.write_text(json.dumps({"words": rows, "speakers": speakers, "inserts": inserts},
+                                   ensure_ascii=False), encoding="utf-8")
         return True
 
     def _run(self, job: dict) -> None:

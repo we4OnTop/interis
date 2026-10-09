@@ -4,6 +4,7 @@ import { ChevronDownIcon, ChevronUpIcon, LoaderIcon, PauseIcon, PlayIcon } from 
 import { Button } from "@/components/ui/button";
 import { api, enc, type InterviewDetail } from "@/lib/api";
 import { useFeedback } from "@/lib/feedback";
+import { type Draft } from "@/components/InsertEditor";
 import { clock } from "@/lib/format";
 import { usePlayer, usePlayerState } from "@/lib/player";
 import { cn } from "@/lib/utils";
@@ -35,6 +36,8 @@ interface Block {
   who: string;
   role: string;
   name: string;
+  /** id of the paragraph you typed in, if this block is one */
+  ins?: number;
   start: number;
   end: number;
   words: W[];
@@ -82,13 +85,15 @@ export function buildBlocks(d: InterviewDetail): Block[] {
       const who = w.sp ?? turn.speaker ?? "?";
       const last = blocks[blocks.length - 1];
       const word = { ti, wi, s: w.s, e: w.e };
-      if (last && last.who === who) {
+      // a paragraph you inserted is a block of its own: it neither joins the words before it nor takes the ones after
+      if (last && last.who === who && last.ins === turn.ins) {
         last.words.push(word);
         last.end = Math.max(last.end, w.e);
       } else {
         const sp = names.get(who);
         blocks.push({
           key: `${ti}:${wi}`,
+          ins: turn.ins,
           who,
           role: sp?.role ?? "unknown",
           name: sp?.display_name || who,
@@ -142,11 +147,18 @@ export function TimeRail({
   onChanged,
   play,
   scrollText,
+  draft,
+  onDraft,
+  onEditInsert,
 }: {
   d: InterviewDetail;
   onChanged: () => void;
   play: (start: number, end?: number) => void;
   scrollText: (turn: number) => void;
+  /** the paragraph being typed in: shown as a dashed bar whose edges can be dragged */
+  draft: Draft | null;
+  onDraft: (patch: Partial<Draft>) => void;
+  onEditInsert: (turn: number) => void;
 }) {
   const { fail, notify } = useFeedback();
   const player = usePlayer();
@@ -163,6 +175,8 @@ export function TimeRail({
   const dragging = useRef<{ x: number; y: number; k0: number; words: W[]; side: "top" | "bottom"; k: number } | null>(null);
 
   const blocks = useMemo(() => buildBlocks(d), [d]);
+  const draftEdge = useRef<"start" | "end" | null>(null);
+  const draftLane = draft && d.speakers.find((x) => x.label === draft.speaker)?.role === "interviewer" ? 0 : 1;
   const duration = useMemo(() => d.parts.reduce((m, p) => Math.max(m, p.offset_s + p.duration_s), 0) || (blocks.at(-1)?.end ?? 0), [d.parts, blocks]);
   const height = Math.ceil((duration + 4) * pps);
   const playing = ps.id === d.id;
@@ -171,6 +185,10 @@ export function TimeRail({
   const sel = selIndex >= 0 ? blocks[selIndex] : null;
   const above = selIndex > 0 ? blocks[selIndex - 1] : null;
   const below = selIndex >= 0 && selIndex < blocks.length - 1 ? blocks[selIndex + 1] : null;
+  // the border between two recorded blocks moves by giving words to the other speaker; a paragraph
+  // you typed in has its own times (edit it)
+  const canMoveTop = !!(sel && above && sel.ins === undefined && above.ins === undefined);
+  const canMoveBottom = !!(sel && below && sel.ins === undefined && below.ins === undefined);
 
   // ---- waveform: made once per recording by a background job, then loaded
   const loadPeaks = useCallback(async () => {
@@ -261,6 +279,13 @@ export function TimeRail({
     },
     [pps, viewH],
   );
+
+  const draftKey = draft ? `${draft.id ?? "new"}:${draft.at}` : null;
+  useEffect(() => {
+    if (draft) scrollTo(draft.start, 0.35);
+    // only when a draft is opened, not while its edges move
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftKey]);
 
   // ---- the track follows the playhead, and follows the text when it is scrolled
   useEffect(() => {
@@ -388,6 +413,19 @@ export function TimeRail({
     play(at - LISTEN_S, at + LISTEN_S);
   };
 
+  const moveDraftEdge = (e: React.PointerEvent) => {
+    const edge = draftEdge.current;
+    if (!edge || !draft) return;
+    const t = Math.round(Math.max(0, timeAt(e.clientY)) * 10) / 10;
+    if (edge === "start") onDraft({ start: Math.min(t, draft.end - 0.3) });
+    else onDraft({ end: Math.max(t, draft.start + 0.3) });
+  };
+  const endDraftEdge = () => {
+    const edge = draftEdge.current;
+    draftEdge.current = null;
+    if (edge && draft) play((edge === "start" ? draft.start : draft.end) - LISTEN_S, (edge === "start" ? draft.start : draft.end) + LISTEN_S);
+  };
+
   const pick = (b: Block) => {
     const w = b.words[Math.floor(b.words.length / 2)];
     setAnchor({ ti: w.ti, wi: w.wi });
@@ -457,6 +495,7 @@ export function TimeRail({
                 className={cn(
                   "absolute overflow-hidden rounded-sm border text-left text-[10px] leading-tight",
                   b.role === "interviewer" ? "bg-question/20 border-question/70" : "bg-foreground/10 border-foreground/35",
+                  b.ins !== undefined && "border-dashed",
                   isSel && "ring-primary z-10 ring-2",
                   playing && ps.time >= b.start && ps.time <= b.end && "brightness-95",
                 )}
@@ -469,10 +508,42 @@ export function TimeRail({
 
           {sel && (
             <>
-              {above && <Handle top={((above.end + sel.start) / 2) * pps} label="Anfang" onDown={(e) => startDrag(e, "top")} onMove={moveDrag} onUp={() => endDrag(above, sel)} />}
-              {below && <Handle top={((sel.end + below.start) / 2) * pps} label="Ende" onDown={(e) => startDrag(e, "bottom")} onMove={moveDrag} onUp={() => endDrag(sel, below)} />}
+              {canMoveTop && <Handle top={((above!.end + sel.start) / 2) * pps} label="Anfang" onDown={(e) => startDrag(e, "top")} onMove={moveDrag} onUp={() => endDrag(above, sel)} />}
+              {canMoveBottom && <Handle top={((sel.end + below!.start) / 2) * pps} label="Ende" onDown={(e) => startDrag(e, "bottom")} onMove={moveDrag} onUp={() => endDrag(sel, below)} />}
             </>
           )}
+
+          {draft && (
+            <div
+              className="border-primary bg-primary/15 pointer-events-none absolute z-20 rounded-sm border-2 border-dashed"
+              style={{ top: draft.start * pps, height: Math.max((draft.end - draft.start) * pps, 6), left: GUTTER + draftLane * (LANE + GAP), width: LANE - 2 }}
+            >
+              <span className="bg-primary text-primary-foreground absolute -top-px left-0 rounded-br px-1 text-[9px] font-semibold">neu</span>
+            </div>
+          )}
+          {draft &&
+            (["start", "end"] as const).map((edge) => (
+              <div
+                key={edge}
+                role="separator"
+                aria-label={`Neuer Absatz: ${edge === "start" ? "Anfang" : "Ende"} verschieben`}
+                title={edge === "start" ? "Anfang des neuen Absatzes ziehen" : "Ende des neuen Absatzes ziehen"}
+                className="absolute z-30 -my-1.5 h-3 cursor-row-resize touch-none"
+                style={{ top: (edge === "start" ? draft.start : draft.end) * pps, left: GUTTER + draftLane * (LANE + GAP), width: LANE - 2 }}
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  draftEdge.current = edge;
+                }}
+                onPointerMove={moveDraftEdge}
+                onPointerUp={endDraftEdge}
+                onPointerCancel={endDraftEdge}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="bg-primary mx-auto mt-1 h-1 w-10 rounded-full" />
+              </div>
+            ))}
 
           {drag && (
             <div className="bg-primary pointer-events-none absolute right-0 left-0 z-30 h-px" style={{ top: drag.t * pps }}>
@@ -492,6 +563,14 @@ export function TimeRail({
             <p className="font-medium">
               {sel.name} · {clock(sel.start)}–{clock(sel.end)} <span className="text-muted-foreground font-normal">({sel.words.length} Wörter)</span>
             </p>
+            {sel.ins !== undefined && (
+              <p className="flex items-center gap-2">
+                <span className="text-muted-foreground">von dir eingefügt</span>
+                <Button size="xs" variant="outline" onClick={() => onEditInsert(sel.words[0].ti)}>
+                  Bearbeiten
+                </Button>
+              </p>
+            )}
             <div className="flex flex-wrap items-center gap-1">
               <Button size="xs" variant="outline" onClick={() => play(sel.start, sel.end)}>
                 <PlayIcon />
@@ -504,10 +583,10 @@ export function TimeRail({
                 Ende
               </Button>
             </div>
-            {above && (
+            {canMoveTop && (
               <Nudge label="Anfang" at={borderTime(above, sel)} onLess={() => void nudge("top", -1)} onMore={() => void nudge("top", 1)} lessTitle="Ein Wort früher beginnen" moreTitle="Ein Wort später beginnen" />
             )}
-            {below && (
+            {canMoveBottom && (
               <Nudge label="Ende" at={borderTime(sel, below)} onLess={() => void nudge("bottom", -1)} onMore={() => void nudge("bottom", 1)} lessTitle="Ein Wort früher enden" moreTitle="Ein Wort später enden" />
             )}
           </>

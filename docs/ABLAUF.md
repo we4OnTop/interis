@@ -114,6 +114,28 @@ zeitlich überlappen, teilen sich ihre Spur nebeneinander.
 - Gespeichert wird als Sprecherkorrektur (wie beim Markieren von Wörtern); die Analyse zeigt danach
   „veraltet“, bis du „Analyse aktualisieren“ wählst.
 
+**Einen Absatz einfügen (+).** Hat die Erkennung einen Einwurf oder einen ganzen Beitrag verpasst
+(z. B. ein „Mhm“ der Interviewerin), steht zwischen zwei Absätzen ein kleines **+**. Es öffnet
+einen Editor unter dem Absatz: **Wer spricht?** (Interviewer oder Befragte:r, bei mehr Personen
+die Auswahl), der **Text**, **Anfang** und **Ende** in der Aufnahme sowie **Anhören**. Während du
+tippst, erscheint der neue Absatz in der Zeitspur als gestrichelter Balken „neu“; **seinen Anfang
+und sein Ende kannst du dort ziehen** (mit Hörprobe) oder im Editor mit ±0,5 s einstellen.
+
+- Die Zeitspanne darf sich **überlappen**: Ein Interviewer-Einwurf, der in die Rede der befragten
+  Person fällt, liegt in der Spur des Interviewers neben dem Beitrag der anderen. Überlappen sich
+  zwei Absätze **in derselben Spur**, teilen sie sich diese in der Breite (Spalten nebeneinander).
+- Ein eingefügter Absatz trägt im Text die Marke „eingefügt ✎“ (anklicken zum Bearbeiten oder
+  Entfernen) und gestrichelten Rand in der Zeitspur. Seine Wörter lassen sich wie alle anderen
+  korrigieren, abspielen und für Fragen und Extrakte markieren; die Zeit der Wörter verteilt Interis
+  im Verhältnis ihrer Länge über die Zeitspanne.
+- **Positionen verschieben sich mit:** Ein neuer Absatz schiebt die folgenden Absätze um eins nach
+  unten, und alles, was an ihnen hängt (Korrekturen, Sprecherkorrekturen, Fragenzuordnungen,
+  Verknüpfungen, Extrakte), wird mitgeschoben. Ein neuer Text im Absatz oder das Entfernen löscht
+  die Korrekturen und Markierungen **in diesem Absatz** (Interis fragt vorher nach).
+- Die Analyse zeigt danach „veraltet“; „Analyse aktualisieren“ nimmt die eingefügten Absätze mit.
+  Das aufgenommene Transkript bleibt unverändert; Neu transkribieren entfernt auch die
+  eingefügten Absätze (mit der bestehenden Rückfrage zu den Markierungen).
+
 **Sprecher nach Stimme:** Ist die Sprechertrennung schlecht, die erste Minute (oder mehr)
 wie oben richtigstellen und „Sprecher nach Stimme …“ wählen. Ein Hintergrundauftrag lernt aus
 diesem Anfang die Stimmen (Stimmabdruck je Satz mit dem Modell der Sprechertrennung) und gibt

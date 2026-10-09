@@ -50,6 +50,9 @@ from interis.pipeline.types import Transcript
 from interis.web import extracts as export
 from interis.web.base import secure_app
 from interis.web.edits import (
+    MAX_INSERT_CHARS,
+    MAX_INSERT_WORDS,
+    MAX_INSERTS,
     MAX_TAG_LEN,
     MAX_TAGS,
     MAX_TEXT_LEN,
@@ -57,6 +60,7 @@ from interis.web.edits import (
     edited_words,
     parse_tags,
     project_tags,
+    with_inserts,
 )
 from interis.web.jobs import JobRunner, guide_path_for
 from interis.web.review import (
@@ -179,6 +183,22 @@ class ReferenceRequest(BaseModel):
     use_voice: bool = False  # the interviewer's voice profile (then no reference needed)
 
 
+class InsertCreate(BaseModel):
+    at: int = Field(ge=0)  # the position the new paragraph gets
+    speaker: str = Field(max_length=60)
+    start: float = Field(ge=0, le=24 * 3600)
+    end: float = Field(ge=0, le=24 * 3600)
+    text: str = Field(min_length=1, max_length=MAX_INSERT_CHARS)
+
+
+class InsertUpdate(BaseModel):
+    speaker: str | None = Field(default=None, max_length=60)
+    start: float | None = Field(default=None, ge=0, le=24 * 3600)
+    end: float | None = Field(default=None, ge=0, le=24 * 3600)
+    text: str | None = Field(default=None, min_length=1, max_length=MAX_INSERT_CHARS)
+    force: bool = False  # a new text removes the markings on the old words: only if confirmed
+
+
 class SpeakerBatch(BaseModel):
     changes: list[SpeakerUpdate] = Field(min_length=1, max_length=200)
 
@@ -236,6 +256,7 @@ class _Data:
         self.store = store
         self.legacy_guide = legacy_guide
         self._cache: dict[Path, tuple[float, Transcript]] = {}
+        self._merged: dict[str, tuple[tuple, Transcript]] = {}  # with the inserted paragraphs
         self._guides: dict[Path, tuple[float, Guide | None, str | None]] = {}
 
     def transcripts(self, ids: list[str] | None = None) -> dict[str, Transcript]:
@@ -253,8 +274,21 @@ class _Data:
             if (not INTERVIEW_ID.match(path.stem)
                     or cached[1].meta.get("interview_id") != path.stem):
                 continue
-            out[path.stem] = cached[1]
+            out[path.stem] = self._with_inserts(path.stem, mtime, cached[1])
         return out
+
+    def _with_inserts(self, iid: str, mtime: float, t: Transcript) -> Transcript:
+        """The transcript every stored position refers to: recorded turns plus the
+        paragraphs you inserted (see :func:`interis.web.edits.with_inserts`)."""
+        inserts = self.store.inserts(iid)
+        if not inserts:
+            return t
+        key = (mtime, tuple((i["id"], i["at"], i["speaker"], i["start"], i["end"], i["text"])
+                            for i in inserts))
+        cached = self._merged.get(iid)
+        if cached is None or cached[0] != key:
+            cached = self._merged[iid] = (key, with_inserts(t, inserts))
+        return cached[1]
 
     def guide_file(self, project_id: int) -> Path:
         return guide_path_for(self.paths, project_id)
@@ -429,7 +463,7 @@ def create_app(paths: Paths, login_token: str, port: int,
         """Anything a person did on this interview that word positions would break."""
         return bool(store.question_marks(interview) or store.links(interview)
                     or store.word_edits(interview) or store.speaker_edits(interview)
-                    or store.extracts([interview])
+                    or store.extracts([interview]) or store.inserts(interview)
                     or store.decisions(interview) or store.reviewed(interview))
 
     def _not_busy(interview: str) -> None:
@@ -747,7 +781,8 @@ def create_app(paths: Paths, login_token: str, port: int,
             "interviews": list(transcripts),
             "cells": {iid: s["cells"] for iid, s in states.items()},
             "unassigned": {iid: s["unassigned"] for iid, s in states.items()},
-            "stale": {iid: edits_stale(t, store.word_edits(iid), store.speaker_edits(iid))
+            "stale": {iid: edits_stale(t, store.word_edits(iid), store.speaker_edits(iid),
+                                       store.inserts(iid))
                             for iid, t in transcripts.items()},
         }
 
@@ -761,6 +796,7 @@ def create_app(paths: Paths, login_token: str, port: int,
         guide = _guide_of(interview)
         state = _state_of(interview, t, guide)
         effective = apply_edits(t, edits, moved)
+        inserted = {i["at"]: i["id"] for i in store.inserts(interview)}
         corrected = {(s["turn"], s["word"]): 2 if s["source"] == "reference" else 1
                      for s in moved}
         codes = {q.code for q in guide.questions} if guide else set()
@@ -780,8 +816,11 @@ def create_app(paths: Paths, login_token: str, port: int,
                 if (ti, wi) in corrected:  # speaker corrected: 1 by hand, 2 by voice
                     item["so"] = corrected[(ti, wi)]
                 words.append(item)
-            turns.append({"speaker": tu.speaker, "start": tu.start, "end": tu.end,
-                          "words": words})
+            turn_item: dict[str, Any] = {"speaker": tu.speaker, "start": tu.start,
+                                         "end": tu.end, "words": words}
+            if ti in inserted:  # a paragraph you typed in
+                turn_item["ins"] = inserted[ti]
+            turns.append(turn_item)
         return {
             "id": interview,
             "project": store.project_of(interview),
@@ -790,7 +829,7 @@ def create_app(paths: Paths, login_token: str, port: int,
             "speakers": t.speakers,
             "turns": turns,
             "reviewed": store.reviewed(interview),
-            "edits_stale": edits_stale(t, edits, moved),
+            "edits_stale": edits_stale(t, edits, moved, store.inserts(interview)),
             "voice_profile": (paths.voices / f"{VOICE}.json").is_file(),
             "decisions": [{"guide_code": d["guide_code"], "reason": d["reason"],
                            "note": d["note"], "in_guide": d["guide_code"] in codes}
@@ -867,6 +906,76 @@ def create_app(paths: Paths, login_token: str, port: int,
         with write_lock:
             _not_transcribing(interview)
             store.set_speakers(interview, body.turn, change)
+        return {"ok": True}
+
+    def _check_insert(t: Transcript, speaker: str, start: float, end: float, text: str) -> str:
+        if speaker not in {s["label"] for s in t.speakers}:
+            raise HTTPException(422, "unknown speaker")
+        duration = max((p["offset_s"] + p["duration_s"] for p in t.parts), default=0.0)
+        if not 0 <= start < end <= duration + 5:
+            raise HTTPException(422, "Zeitspanne: Anfang vor Ende, innerhalb der Aufnahme")
+        if end - start > 600:
+            raise HTTPException(422, "Ein Absatz dauert höchstens 10 Minuten")
+        text = " ".join(text.split())
+        if not text:
+            raise HTTPException(422, "Text fehlt")
+        if len(text.split()) > MAX_INSERT_WORDS:
+            raise HTTPException(422, f"Höchstens {MAX_INSERT_WORDS} Wörter je Absatz")
+        return text
+
+    def _insert_row(interview: str, insert_id: int) -> dict[str, Any]:
+        row = next((i for i in store.inserts(interview) if i["id"] == insert_id), None)
+        if row is None:
+            raise HTTPException(404, "unknown paragraph")
+        return row
+
+    @app.post("/api/interviews/{interview}/inserts")
+    def add_insert(interview: str, body: InsertCreate) -> dict[str, int]:
+        """A paragraph you type in (e.g. an interjection diarization missed), placed at
+        position ``at``. Later turns move down by one, with everything stored for them.
+        The page shows "Analyse veraltet"."""
+        _interview_in_project(interview)
+        t = _transcript(interview)
+        text = _check_insert(t, body.speaker, body.start, body.end, body.text)
+        if body.at > len(t.turns):
+            raise HTTPException(422, "position outside the transcript")
+        with write_lock:
+            _not_transcribing(interview)
+            if len(store.inserts(interview)) >= MAX_INSERTS:
+                raise HTTPException(409, f"Höchstens {MAX_INSERTS} eingefügte Absätze")
+            new_id = store.add_insert(interview, body.at, body.speaker, body.start, body.end,
+                                      text)
+        return {"id": new_id, "at": body.at}
+
+    @app.put("/api/interviews/{interview}/inserts/{insert_id}")
+    def update_insert(interview: str, insert_id: int, body: InsertUpdate) -> dict[str, bool]:
+        _interview_in_project(interview)
+        t = _transcript(interview)
+        row = _insert_row(interview, insert_id)
+        merged = {"speaker": body.speaker or row["speaker"],
+                  "start": row["start"] if body.start is None else body.start,
+                  "end": row["end"] if body.end is None else body.end,
+                  "text": row["text"] if body.text is None else body.text}
+        merged["text"] = _check_insert(t, merged["speaker"], merged["start"], merged["end"],
+                                       merged["text"])
+        new_words = merged["text"] != row["text"]
+        with write_lock:
+            _not_transcribing(interview)
+            if new_words and not body.force and store.turn_has_markings(interview, row["at"]):
+                raise HTTPException(409, "Ein neuer Text entfernt die Korrekturen und "
+                                         "Markierungen in diesem Absatz")
+            store.update_insert(interview, insert_id, merged, new_words)
+        return {"ok": True}
+
+    @app.delete("/api/interviews/{interview}/inserts/{insert_id}")
+    def delete_insert(interview: str, insert_id: int, force: bool = False) -> dict[str, bool]:
+        _interview_in_project(interview)
+        row = _insert_row(interview, insert_id)
+        with write_lock:
+            _not_transcribing(interview)
+            if not force and store.turn_has_markings(interview, row["at"]):
+                raise HTTPException(409, "In diesem Absatz sind Korrekturen oder Markierungen")
+            store.delete_insert(interview, insert_id)
         return {"ok": True}
 
     @app.post("/api/interviews/{interview}/speakers/batch")
@@ -970,7 +1079,7 @@ def create_app(paths: Paths, login_token: str, port: int,
                 state = _state_of(iid, t, guide)
                 cells = {code: cell["status"] for code, cell in state["cells"].items()}
                 unassigned = len(state["unassigned"])
-                stale = edits_stale(t, edits, moved)
+                stale = edits_stale(t, edits, moved, store.inserts(iid))
             rows.append({"id": iid, "transcribed": t is not None,
                          "reviewed": store.reviewed(iid), "edits": edits,
                          "edits_stale": stale, "cells": cells, "unassigned": unassigned,

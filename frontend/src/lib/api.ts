@@ -274,6 +274,8 @@ export interface Turn {
   start: number;
   end: number;
   words: Word[];
+  /** id of the paragraph you typed in, if this is one */
+  ins?: number;
 }
 
 export interface Speaker {

@@ -104,6 +104,18 @@ CREATE TABLE IF NOT EXISTS speaker_edits (
     PRIMARY KEY (interview_id, turn, word)
 );
 -- Extraction: a passage of an answer, summarised in your own words for a guide question.
+-- Paragraphs you typed in (a missed interjection, a missed speaker). ``at`` is the position
+-- the paragraph has in the transcript with all inserts; stored positions refer to that.
+CREATE TABLE IF NOT EXISTS inserted_turns (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    interview_id TEXT NOT NULL,
+    at           INTEGER NOT NULL,
+    speaker      TEXT NOT NULL,
+    start        REAL NOT NULL,
+    "end"        REAL NOT NULL,
+    text         TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS extracts (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     interview_id TEXT NOT NULL,
@@ -136,7 +148,9 @@ CREATE TABLE IF NOT EXISTS asr_presets (
 
 # Tables whose rows refer to word positions of one interview.
 DECISION_TABLES = ("question_marks", "answer_links", "word_edits", "speaker_edits",
-                   "extracts", "question_decisions")
+                   "extracts", "question_decisions", "inserted_turns")
+# the ones keyed by a turn position (question_decisions only by guide code)
+TURN_TABLES = ("question_marks", "answer_links", "word_edits", "speaker_edits", "extracts")
 
 
 def _now() -> str:
@@ -569,6 +583,76 @@ class Store:
         with self._conn() as c:
             c.execute("UPDATE jobs SET status = 'queued', stage = '', progress = 0 "
                       "WHERE status = 'running'")
+
+    # ---------------------------------------------------------------- inserted paragraphs
+    def inserts(self, interview_id: str) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute('SELECT id, at, speaker, start, "end", text FROM inserted_turns '
+                             "WHERE interview_id = ? ORDER BY at", (interview_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    @staticmethod
+    def _shift(c: sqlite3.Connection, interview_id: str, first: int, delta: int) -> None:
+        """Move every stored position from turn ``first`` on by ``delta``. Two steps, because
+        the keys may not collide on the way."""
+        big = 1_000_000
+        for table in TURN_TABLES:
+            c.execute(f"UPDATE {table} SET turn = turn + ? WHERE interview_id = ? "  # noqa: S608
+                      "AND turn >= ?", (big, interview_id, first))
+            c.execute(f"UPDATE {table} SET turn = turn - ? + ? WHERE interview_id = ? "  # noqa: S608
+                      "AND turn >= ?", (big, delta, interview_id, big))
+        c.execute("UPDATE inserted_turns SET at = at + ? WHERE interview_id = ? AND at >= ?",
+                  (delta, interview_id, first))
+
+    def add_insert(self, interview_id: str, at: int, speaker: str, start: float, end: float,
+                   text: str) -> int:
+        """A paragraph at position ``at``; the turns from there on move one place down, and
+        so do the corrections, markings and extracts that refer to them."""
+        with self._conn() as c:
+            self._shift(c, interview_id, at, 1)
+            cur = c.execute('INSERT INTO inserted_turns (interview_id, at, speaker, start, "end", '
+                            "text, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (interview_id, at, speaker, start, end, text, _now()))
+        return int(cur.lastrowid)
+
+    def turn_has_markings(self, interview_id: str, turn: int) -> bool:
+        with self._conn() as c:
+            return any(c.execute(f"SELECT 1 FROM {t} WHERE interview_id = ? AND turn = ? "  # noqa: S608
+                                 "LIMIT 1", (interview_id, turn)).fetchone()
+                       for t in TURN_TABLES)
+
+    def _wipe_turn(self, c: sqlite3.Connection, interview_id: str, turn: int) -> None:
+        for table in TURN_TABLES:
+            c.execute(f"DELETE FROM {table} WHERE interview_id = ? AND turn = ?",  # noqa: S608
+                      (interview_id, turn))
+
+    def update_insert(self, interview_id: str, insert_id: int, fields: dict[str, Any],
+                      new_words: bool) -> None:
+        """Change a paragraph. ``new_words``: its text changed, so the markings on its
+        words (positions inside it) no longer fit and are removed."""
+        allowed = {"speaker", "start", "end", "text"}
+        assert set(fields) <= allowed, fields
+        with self._conn() as c:
+            row = c.execute("SELECT at FROM inserted_turns WHERE id = ? AND interview_id = ?",
+                            (insert_id, interview_id)).fetchone()
+            if row is None:
+                return
+            if new_words:
+                self._wipe_turn(c, interview_id, row["at"])
+            cols = ", ".join(f'"{k}" = ?' for k in fields)  # keys checked against the allow-list
+            c.execute(f"UPDATE inserted_turns SET {cols}, updated_at = ? WHERE id = ?",  # noqa: S608
+                      (*fields.values(), _now(), insert_id))
+
+    def delete_insert(self, interview_id: str, insert_id: int) -> None:
+        """Remove a paragraph with everything marked in it; later turns move up again."""
+        with self._conn() as c:
+            row = c.execute("SELECT at FROM inserted_turns WHERE id = ? AND interview_id = ?",
+                            (insert_id, interview_id)).fetchone()
+            if row is None:
+                return
+            self._wipe_turn(c, interview_id, row["at"])
+            c.execute("DELETE FROM inserted_turns WHERE id = ?", (insert_id,))
+            self._shift(c, interview_id, row["at"] + 1, -1)
 
     def delete_decisions(self, interview_id: str) -> None:
         """Everything tied to word positions. Needed after a new transcription."""

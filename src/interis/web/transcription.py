@@ -25,7 +25,7 @@ from interis.models import ASR_MODELS
 from interis.pipeline.evaluate import reference_from_transcript
 from interis.pipeline.tune import Span, TuneError, snap_to_turns, suggest_span
 from interis.pipeline.types import Transcript
-from interis.web.edits import apply_edits
+from interis.web.edits import apply_edits, with_inserts
 from interis.web.jobs import trial_file, trial_steps
 
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
@@ -241,7 +241,8 @@ def add_transcription_routes(app: FastAPI, paths: Paths, store, runner,
         if not src.is_file():
             raise HTTPException(422, f"{iid}: noch nicht transkribiert")
         raw = Transcript.from_dict(json.loads(src.read_text(encoding="utf-8")))
-        return apply_edits(raw, store.word_edits(iid), store.speaker_edits(iid))
+        return apply_edits(with_inserts(raw, store.inserts(iid)), store.word_edits(iid),
+                           store.speaker_edits(iid))
 
     def _describe(iid: str, t: Transcript, span: Span) -> dict[str, Any]:
         """What the stretch contains, so you can see what the tuning will measure against."""

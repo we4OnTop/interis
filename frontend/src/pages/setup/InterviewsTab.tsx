@@ -169,7 +169,7 @@ function InterviewCard({ iv }: { iv: InterviewRow }) {
         const ok = await confirm({
           title: `${iv.id} neu transkribieren?`,
           description:
-            "Dabei entstehen neue Wortpositionen. Deine Arbeit an diesem Gespräch wird deshalb entfernt: Fragen-Zuordnungen, Verknüpfungen, Korrekturen, Sprecherkorrekturen, Glättungen, Begründungen, Extrakte und der Status „Korrektur abgeschlossen“.",
+            "Dabei entstehen neue Wortpositionen. Deine Arbeit an diesem Gespräch wird deshalb entfernt: Fragen-Zuordnungen, Verknüpfungen, Korrekturen, Sprecherkorrekturen, eingefügte Absätze, Glättungen, Begründungen, Extrakte und der Status „Korrektur abgeschlossen“.",
           confirm: "Neu transkribieren",
           destructive: true,
         });

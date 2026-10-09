@@ -141,9 +141,10 @@ def cmd_enroll(args: argparse.Namespace, paths: Paths) -> int:
     return 0
 
 
-def _load_edits(path: str) -> tuple[list[dict], list[dict]]:
-    """Word and speaker edits written by the website: {"words": [{turn, word, action, text,
-    ...}], "speakers": [{turn, word, speaker}]}, or only the list of word edits."""
+def _load_edits(path: str) -> tuple[list[dict], list[dict], list[dict]]:
+    """Word edits, speaker edits and inserted paragraphs written by the website: {"words":
+    [{turn, word, action, text, ...}], "speakers": [{turn, word, speaker}], "inserts": [{id,
+    at, speaker, start, end, text}]}, or only the list of word edits."""
     from interis.web.edits import ACTIONS
 
     data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -155,13 +156,21 @@ def _load_edits(path: str) -> tuple[list[dict], list[dict]]:
             and isinstance(e.get("word"), int)
 
     words, speakers = data.get("words"), data.get("speakers")
+    inserts = data.get("inserts", [])
+
+    def ins(i: object) -> bool:
+        return (isinstance(i, dict) and isinstance(i.get("at"), int)
+                and isinstance(i.get("speaker"), str) and isinstance(i.get("text"), str)
+                and all(isinstance(i.get(k), (int, float)) for k in ("start", "end")))
+
     valid = isinstance(words, list) and isinstance(speakers, list) and all(
         pos(e) and e.get("action") in ACTIONS and isinstance(e.get("text", ""), str)
-        for e in words) and all(pos(s) and isinstance(s.get("speaker"), str) for s in speakers)
+        for e in words) and all(pos(s) and isinstance(s.get("speaker"), str) for s in speakers
+                                ) and isinstance(inserts, list) and all(ins(i) for i in inserts)
     if not valid:
         raise ValueError("edits file: expected {words: [{turn, word, action, text}], "
-                         "speakers: [{turn, word, speaker}]}")
-    return words, speakers
+                         "speakers: [{turn, word, speaker}], inserts: [...]}")
+    return words, speakers, inserts
 
 
 def cmd_speakers(args: argparse.Namespace, paths: Paths) -> int:
@@ -188,7 +197,7 @@ def cmd_speakers(args: argparse.Namespace, paths: Paths) -> int:
     )
     from interis.pipeline.run import SAMPLE_RATE, decode
     from interis.pipeline.types import Transcript
-    from interis.web.edits import apply_edits
+    from interis.web.edits import apply_edits, with_inserts
 
     raw = Transcript.from_dict(json.loads(Path(args.transcript).read_text(encoding="utf-8")))
     parts = raw.meta["audio"].get("parts") or []
@@ -198,7 +207,7 @@ def cmd_speakers(args: argparse.Namespace, paths: Paths) -> int:
                                            for f, p in zip(files, parts, strict=True)):
             raise ValueError("the recordings differ from the ones this transcript was made "
                              "from")
-        words, moved = _load_edits(args.edits) if args.edits else ([], [])
+        words, moved, inserted = _load_edits(args.edits) if args.edits else ([], [], [])
         model_dir = verify_ready(paths, DIARIZATION_MODEL)
         voice = None
         if args.voice:
@@ -218,7 +227,7 @@ def cmd_speakers(args: argparse.Namespace, paths: Paths) -> int:
         x = decode(f)
         at = int(p["offset_s"] * SAMPLE_RATE)
         audio[at:at + len(x)] = x[:len(audio) - at]
-    effective = apply_edits(raw, words, moved)
+    effective = apply_edits(with_inserts(raw, inserted), words, moved)
     sentences = split_sentences(effective.turns)
     embed = voice_embedder(model_dir)
     progress = _progress_json() if args.progress_json else _progress_printer()
@@ -265,7 +274,7 @@ def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
     from interis.models import ModelError
     from interis.pipeline.run import run_analysis
     from interis.pipeline.types import Transcript
-    from interis.web.edits import apply_edits, edits_digest
+    from interis.web.edits import apply_edits, edits_digest, with_inserts
 
     if args.all:
         sources = [p for p in sorted(paths.exports.glob("*/*.json")) if p.stem == p.parent.name]
@@ -278,7 +287,7 @@ def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
         print("ERROR: --edits belongs to one transcript", file=sys.stderr)
         return 2
     try:
-        edits, speakers = _load_edits(args.edits) if args.edits else ([], [])
+        edits, speakers, inserted = _load_edits(args.edits) if args.edits else ([], [], [])
     except (OSError, ValueError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
@@ -286,7 +295,8 @@ def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
         raw = Transcript.from_dict(json.loads(src.read_text(encoding="utf-8")))
         has_roles = any(s.get("role") in ("interviewer", "interviewee")
                         for s in raw.speakers)
-        effective = apply_edits(raw, edits, speakers)  # the analysis sees the edited text
+        # the analysis sees the edited text with the paragraphs you inserted
+        effective = apply_edits(with_inserts(raw, inserted), edits, speakers)
         try:
             run_analysis(effective, paths, _analysis_options(args, paths, not has_roles),
                          threads=args.threads)
@@ -294,7 +304,8 @@ def cmd_analyze(args: argparse.Namespace, paths: Paths) -> int:
             print(f"ERROR: {e}", file=sys.stderr)
             return 1
         # Only the analysis goes back into the transcript; its words stay as recorded.
-        raw.analysis = {**effective.analysis, "edits_digest": edits_digest(edits, speakers)}
+        digest = edits_digest(edits, speakers, inserted)
+        raw.analysis = {**effective.analysis, "edits_digest": digest}
         try:
             _write_outputs(raw, src.parent, args.formats)
         except ValueError as e:
@@ -402,7 +413,7 @@ def _tune_window(spec: str, paths: Paths, store):
     from interis.pipeline.evaluate import reference_from_transcript
     from interis.pipeline.tune import MAX_WINDOW_S, Window, snap_to_turns
     from interis.pipeline.types import Transcript
-    from interis.web.edits import apply_edits
+    from interis.web.edits import apply_edits, with_inserts
 
     iid, _, span = spec.partition(":")
     src = paths.exports / iid / f"{iid}.json"
@@ -420,7 +431,8 @@ def _tune_window(spec: str, paths: Paths, store):
     b = float(end) if end else min(raw.meta["audio"]["duration_s"], a + MAX_WINDOW_S)
     if not 0 <= a < b <= raw.meta["audio"]["duration_s"] + 1:
         raise ValueError(f"{iid}: time window outside the recording")
-    effective = apply_edits(raw, store.word_edits(iid), store.speaker_edits(iid))
+    effective = apply_edits(with_inserts(raw, store.inserts(iid)), store.word_edits(iid),
+                            store.speaker_edits(iid))
     try:  # whole speaker turns only: never cut in the middle of what somebody says
         span = snap_to_turns(effective, a, b)
     except ValueError as e:
