@@ -659,11 +659,19 @@ function StepsView({ id, steps, length, offset, labels }: { id: number; steps: T
       <div className="mt-3 space-y-4">
         <section className="space-y-1.5">
           <h4 className="text-xs font-semibold tracking-wide uppercase">Audio je Schritt</h4>
-          {steps.audio.map((a) => (
+          {steps.audio.map((a, i) => (
             <div key={a.file} className="flex flex-wrap items-center gap-2">
               <span className="w-48 text-xs">
                 {a.label}
-                {a.file === steps.heard_by_models && <span className="text-muted-foreground block">← das hören die Modelle</span>}
+                {a.file === steps.heard_by_models && (
+                  <span className="text-muted-foreground block">
+                    ← hören Spracherkennung und Sprechertrennung{a.file.startsWith("03") ? "" : " und die Wort-Ausrichtung"}
+                  </span>
+                )}
+                {/* levelling is only for recognition and diarization; alignment gets the stage before it */}
+                {steps.heard_by_models.startsWith("03") && i === steps.audio.length - 2 && (
+                  <span className="text-muted-foreground block">← hört die Wort-Ausrichtung</span>
+                )}
               </span>
               <audio controls preload="none" className="h-8 max-w-full" src={`/api/trials/${id}/audio/${a.file}`} />
             </div>
